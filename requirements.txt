@@ -1,0 +1,17 @@
+openai>=1.12.0
+datasets
+pandas
+numpy
+matplotlib
+seaborn
+scikit-learn
+tqdm
+pyyaml
+
+torch
+transformers
+accelerate
+
+# optional
+jupyter
+unsloth
