@@ -242,7 +242,7 @@ if __name__ == "__main__":
         "experiment_name": "HUV_Framework_Demo_SFT_vs_RL",
         "version": "1.1.0",
         "dataset": "gsm8k",
-        "data_limit": 10,      # Small limit for demonstration
+        "data_limit": 200,      # Small limit for demonstration
         "n_samples": 5,        # Increased samples for Semantic UQ analysis
         "output_dir": "output",
         "db_path": "db/results.sqlite",
