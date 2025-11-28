@@ -17,7 +17,7 @@ except ImportError:
     print("Error: 'transformers' library not found. Calibration requires it.")
     AutoModelForCausalLM = None
 
-def calibrate(model_name, save_path):
+def calibrate(model_name, save_path, identify_by_cosine_sim=False, identify_by_variance=True, identify_by_max_std_dev=True, k=5):
     """
     Identifies Entropy Neurons based on Normalized Logit Attribution Variance (Cosine Similarity).
     
@@ -36,7 +36,7 @@ def calibrate(model_name, save_path):
     try:
         model = AutoModelForCausalLM.from_pretrained(
             model_name,
-            torch_dtype=torch.float16,
+            torch_dtype=torch.float32,
             device_map="cpu", 
             low_cpu_mem_usage=True,
             trust_remote_code=True 
@@ -58,20 +58,37 @@ def calibrate(model_name, save_path):
         print(f"Error: Could not identify necessary layers in {model_name}.")
         return
 
-    vocab_size = WU.shape[0]
-    d_mlp = Wout.shape[1] 
+    # list to keep track of all entropy neurons
+    neuron_candidates = []
 
-    # Optimization: Sample vocabulary to save memory
-    # The notebook uses full vocab, but 128k vocab (Llama3) is too large for consumer RAM without batching
-    V_subset_size = min(vocab_size, 8192) 
-    print(f"Vocab size: {vocab_size}. MLP Dim: {d_mlp}. Sampling {V_subset_size} tokens for calibration.")
-    
-    idx = torch.randperm(vocab_size)[:V_subset_size]
-    WU_sub = WU[idx] # [V_sub, d_model]
+    # identify the entropy neurons through different tecniques
+    if identify_by_cosine_sim:
+        neuron_candidates.append(cosine_sim_identification(WU, Wout, k=k))
+    elif identify_by_variance or identify_by_max_std_dev:
+        L = WU @ Wout
+        if identify_by_variance:
+            vars = torch.var(L, dim=0)
+            neuron_candidates.append(torch.topk(vars, k=k, largest=False).indices)
+        elif identify_by_max_std_dev:
+            neuron_candidates.append(max_std_dev_identification(L))
 
+    # 2. Concatenate all collected tensors
+    if len(neuron_candidates) > 0:
+        entropy_neurons = torch.cat(neuron_candidates)
+    else:
+        entropy_neurons = torch.tensor([], dtype=torch.long)
+
+    full_save_path = os.path.join(project_root, save_path)
+    os.makedirs(os.path.dirname(full_save_path), exist_ok=True)
+    with open(full_save_path, "w") as f:
+        json.dump(entropy_neurons.tolist(), f)
+
+    print(f"Calibration complete. Saved {len(entropy_neurons)} indices to {full_save_path}")
+
+def cosine_sim_identification(WU, Wout, k=5):
     # 1. Pre-calculate ||WU|| (Row norms) for the subset
     # Shape: [V_sub, 1]
-    WU_norm = torch.norm(WU_sub, dim=1, keepdim=True)
+    WU_norm = torch.norm(WU, dim=1, keepdim=True)
 
     batch_size = 256
     variances = []
@@ -79,6 +96,7 @@ def calibrate(model_name, save_path):
     print("Calculating normalized logit variances per neuron...")
     
     for i in tqdm(range(0, d_mlp, batch_size)):
+        d_mlp = Wout.shape[1] 
         Wout_batch = Wout[:, i:i+batch_size] # [d_model, batch_size]
         
         # 2. Calculate ||Wout|| (Column norms) for this batch
@@ -87,7 +105,7 @@ def calibrate(model_name, save_path):
         
         # 3. Compute Raw Logits: ψ = WU @ Wout
         # Shape: [V_sub, batch_size]
-        L_batch = WU_sub @ Wout_batch
+        L_batch = WU @ Wout_batch
         
         # 4. Compute Normalization Factor (Outer Product)
         # Shape: [V_sub, batch_size] = [V_sub, 1] * [1, batch_size]
@@ -102,19 +120,17 @@ def calibrate(model_name, save_path):
         variances.append(vars_batch)
 
     all_variances = torch.cat(variances)
-
-    # Identify Entropy Neurons: characterized by LOW variance
-    K_percent = 0.05 
-    k = int(d_mlp * K_percent)
     
     topk_indices = torch.topk(all_variances, k=k, largest=False).indices
+    return topk_indices
 
-    full_save_path = os.path.join(project_root, save_path)
-    os.makedirs(os.path.dirname(full_save_path), exist_ok=True)
-    with open(full_save_path, "w") as f:
-        json.dump(topk_indices.tolist(), f)
-
-    print(f"Calibration complete. Saved {len(topk_indices)} indices to {full_save_path}")
+def max_std_dev_identification(L, k=5):
+    # calculate the mean over the vocabulary dimension
+    expectation = torch.mean(L, dim=0)
+    # Want to take the max distance from the mean over the vocab dimension for each neuron
+    l_inf_sttdev = torch.max(torch.abs((L - expectation)), dim=0).values
+    topk_indices = torch.topk(l_inf_sttdev, k=k, largest=False).indices
+    return topk_indices
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Calibrate Entropy Neurons (Normalized).")
