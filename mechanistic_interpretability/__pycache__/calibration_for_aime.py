@@ -151,6 +151,7 @@ if __name__ == "__main__":
             device = 'mps'
         else:
             device = 'cpu'
+        print(f"Device is set to: {device}")
 
         model = AutoModelForCausalLM.from_pretrained(
             "unsloth/Meta-Llama-3.1-8B",
@@ -176,4 +177,4 @@ if __name__ == "__main__":
         use_input=True
     )
     
-    evaluator.evaluate(num_samples=2, output_file="aime_results.csv")
+    evaluator.evaluate(output_file="aime_results.csv")
