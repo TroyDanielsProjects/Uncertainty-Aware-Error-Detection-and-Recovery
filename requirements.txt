@@ -1,0 +1,15 @@
+torch>=2.0.0
+pandas
+datasets
+tqdm
+
+Unsloth is recommended for Llama 3.1 optimization
+
+unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git
+
+Standard Hugging Face libraries (usually installed by unsloth, but good to be explicit)
+
+transformers
+accelerate
+bitsandbytes
+scipy
