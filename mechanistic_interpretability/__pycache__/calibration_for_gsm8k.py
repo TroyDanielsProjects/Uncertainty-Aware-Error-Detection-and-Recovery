@@ -168,8 +168,8 @@ if __name__ == "__main__":
 
         model = AutoModelForCausalLM.from_pretrained(
             "unsloth/Meta-Llama-3.1-8B",
-            torch_dtype=torch.bfloat16,
-            device_map='mps', 
+            dtype=torch.bfloat16,
+            device_map=device, 
             low_cpu_mem_usage=True,
             trust_remote_code=True 
         )
