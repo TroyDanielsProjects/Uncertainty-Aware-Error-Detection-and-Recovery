@@ -57,14 +57,50 @@ def plot_mean_activation_dist(df, neuron_cols, output_dir='plots'):
     print(f"Saved mean_activation_distribution.png")
     plt.close()
 
-def plot_max_activation_boxplot(df, neuron_cols, output_dir='plots'):
+def plot_mean_activation_per_neuron_dist(df, neuron_cols, output_dir='plots'):
+    """
+    1. Histogram of Average Activation (Correct vs Incorrect).
+    Aggregates all neuron values for a problem_id to get one 'mean' score.
+    """
+    for col in neuron_cols:
+        # Group by problem_id to get one stat per generation
+        # We take the mean across ALL tokens and ALL tracked neurons for that problem
+        problem_stats = df.groupby(['problem_id', 'is_correct'])[col].mean().reset_index()
+        problem_stats.columns = ['problem_id', 'is_correct', 'mean_activation']
+        
+        plt.figure(figsize=(10, 6))
+        sns.histplot(
+            data=problem_stats, 
+            x='mean_activation', 
+            hue='is_correct', 
+            kde=True, 
+            element="step",
+            stat="density",
+            common_norm=False,
+            palette={True: "green", False: "red"}
+        )
+        plt.title("Distribution of Average Neuron Activation\n(Correct vs Incorrect)")
+        plt.xlabel("Mean Activation Value")
+        plt.ylabel("Density")
+        plt.grid(True, alpha=0.3)
+        
+        os.makedirs(output_dir, exist_ok=True)
+        plt.savefig(f"{output_dir}/mean_activation/mean_activation_distribution_neuron_{col}.png")
+        print(f"Saved mean_activation_distribution.png")
+        plt.close()
+
+def plot_max_activation_boxplot(df, neuron_cols, output_dir='plots', positive_values=True):
     """
     2. Max Activation Analysis.
     Tests the hypothesis: "Max activations typically show the answer is wrong."
     """
     # Get the single MAX value recorded across all tokens/neurons for each problem
-    problem_max = df.groupby(['problem_id', 'is_correct'])[neuron_cols].max().max(axis=1).reset_index()
-    problem_max.columns = ['problem_id', 'is_correct', 'max_activation']
+    if positive_values:
+        problem_max = df.groupby(['problem_id', 'is_correct'])[neuron_cols].max().max(axis=1).reset_index()
+        problem_max.columns = ['problem_id', 'is_correct', 'max_activation']
+    else:
+        problem_max = df.groupby(['problem_id', 'is_correct'])[neuron_cols].min().min(axis=1).reset_index()
+        problem_max.columns = ['problem_id', 'is_correct', 'max_activation']
     
     plt.figure(figsize=(8, 6))
     sns.boxplot(
@@ -80,10 +116,51 @@ def plot_max_activation_boxplot(df, neuron_cols, output_dir='plots'):
     plt.xlabel("Is Answer Correct?")
     plt.ylabel("Max Activation Value")
     plt.grid(True, axis='y', alpha=0.3)
-    
-    plt.savefig(f"{output_dir}/max_activation_boxplot.png")
+    if positive_values:
+        plt.savefig(f"{output_dir}/max_activation_boxplot.png")
+    else:
+        plt.savefig(f"{output_dir}/min_activation_boxplot.png")
     print(f"Saved max_activation_boxplot.png")
     plt.close()
+
+def plot_max_activation_per_neuron_boxplot(df, neuron_cols, output_dir='plots', positive_values=True):
+    """
+    2. Max Activation Analysis.
+    Tests the hypothesis: "Max activations typically show the answer is wrong."
+    """
+    # Get the single MAX value recorded across all tokens/neurons for each problem
+    if positive_values:
+        output_dir += "/max_activation/"
+    else:
+        output_dir += "/min_activation/"
+    os.makedirs(output_dir, exist_ok=True)
+    for col in neuron_cols:
+        if positive_values:
+            problem_max = df.groupby(['problem_id', 'is_correct'])[col].max().reset_index()
+            problem_max.columns = ['problem_id', 'is_correct', 'max_activation']
+        else:
+            problem_max = df.groupby(['problem_id', 'is_correct'])[col].min().reset_index()
+            problem_max.columns = ['problem_id', 'is_correct', 'max_activation']
+        plt.figure(figsize=(8, 6))
+        sns.boxplot(
+            data=problem_max,
+            x='is_correct',
+            y='max_activation',
+            hue='is_correct', # Fix for FutureWarning
+            legend=False,     # Fix for FutureWarning
+            palette={True: "green", False: "red"}
+        )
+        
+        plt.title(f"Maximum Activation Value Recorded\nNeuron: {col}")
+        plt.xlabel("Is Answer Correct?")
+        plt.ylabel("Max Activation Value")
+        plt.grid(True, axis='y', alpha=0.3)
+        if positive_values:
+            plt.savefig(f"{output_dir}max_activation_Neuron_{col}_boxplot.png")
+        else:
+            plt.savefig(f"{output_dir}min_activation_Neuron_{col}_boxplot.png")
+        print(f"Saved max_activation_boxplot.png")
+        plt.close()
 
 def plot_last_token_activations(df, neuron_cols, output_dir='plots'):
     """
@@ -176,10 +253,12 @@ if __name__ == "__main__":
         df, neuron_cols = load_and_prep_data(FILE_PATH)
         
         # Plot
-        plot_mean_activation_dist(df, neuron_cols, OUTPUT_DIR)
-        plot_max_activation_boxplot(df, neuron_cols, OUTPUT_DIR)
-        plot_last_token_activations(df, neuron_cols, OUTPUT_DIR)
-        plot_activation_trajectory(df, neuron_cols, OUTPUT_DIR)
+        # plot_mean_activation_dist(df, neuron_cols, OUTPUT_DIR)
+        # plot_max_activation_boxplot(df, neuron_cols, OUTPUT_DIR, positive_values=False)
+        # plot_last_token_activations(df, neuron_cols, OUTPUT_DIR)
+        # plot_activation_trajectory(df, neuron_cols, OUTPUT_DIR)
+        plot_max_activation_per_neuron_boxplot(df, neuron_cols, OUTPUT_DIR, positive_values=False)
+        # plot_mean_activation_per_neuron_dist(df, neuron_cols, OUTPUT_DIR)
         
         print(f"\nAll plots saved to ./{OUTPUT_DIR}/")
         

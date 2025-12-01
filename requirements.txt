@@ -9,4 +9,5 @@ scipy
 seaborn
 numpy
 matplotlib
+screen
 unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git
