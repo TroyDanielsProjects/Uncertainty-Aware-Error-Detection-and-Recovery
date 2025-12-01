@@ -189,6 +189,6 @@ if __name__ == "__main__":
     
     # Run a quick test
     try:
-        evaluator.evaluate(num_samples=150)
+        evaluator.evaluate(num_samples=500)
     except Exception as e:
         print(f"Test run skipped or failed (expected if datasets not installed): {e}")

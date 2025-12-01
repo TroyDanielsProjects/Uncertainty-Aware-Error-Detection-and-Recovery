@@ -253,12 +253,12 @@ if __name__ == "__main__":
         df, neuron_cols = load_and_prep_data(FILE_PATH)
         
         # Plot
-        # plot_mean_activation_dist(df, neuron_cols, OUTPUT_DIR)
-        # plot_max_activation_boxplot(df, neuron_cols, OUTPUT_DIR, positive_values=False)
-        # plot_last_token_activations(df, neuron_cols, OUTPUT_DIR)
-        # plot_activation_trajectory(df, neuron_cols, OUTPUT_DIR)
+        plot_mean_activation_dist(df, neuron_cols, OUTPUT_DIR)
+        plot_max_activation_boxplot(df, neuron_cols, OUTPUT_DIR, positive_values=False)
+        plot_last_token_activations(df, neuron_cols, OUTPUT_DIR)
+        plot_activation_trajectory(df, neuron_cols, OUTPUT_DIR)
         plot_max_activation_per_neuron_boxplot(df, neuron_cols, OUTPUT_DIR, positive_values=False)
-        # plot_mean_activation_per_neuron_dist(df, neuron_cols, OUTPUT_DIR)
+        plot_mean_activation_per_neuron_dist(df, neuron_cols, OUTPUT_DIR)
         
         print(f"\nAll plots saved to ./{OUTPUT_DIR}/")
         
