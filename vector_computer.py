@@ -2,17 +2,8 @@
 Utility functions and classes for computing holistic uncertainty vectors.
 
 This module consolidates the pieces of the uncertainty quantification
-framework required by the main pipeline.  It defines a dataclass to
-represent the Holistic Uncertainty Vector (HUV) and provides a
-computer to construct HUVs from generation traces.  The traces are
-expected to be dictionaries or objects with a ``get`` method returning
-fields such as ``text``, ``entropies``, ``top1_logprobs``,
-``top2_logprobs`` and optionally ``activations``.
-
-Only the functions used by the calibration and experiment runner are
-included here.  Expensive optional dependencies such as
-``sentence‑transformers`` and external API calls have been stripped
-out to keep the pipeline self contained.
+framework required by the main pipeline. It provides functions to
+compute scalar summaries and granular token-level metrics.
 """
 
 from __future__ import annotations
@@ -30,27 +21,15 @@ from collections import Counter
 # Helper functions for entropic metrics
 # ---------------------------------------------------------------------------
 
-def compute_saup_score(e: List[float]) -> float:
-    """
-    Compute the square‑average uncertainty (SAUP) score for a list of
-    entropies.  This is the root mean square of the entropies which
-    emphasises variability over the sequence.
-    """
-    e_arr = np.array(e, dtype=float)
-    if e_arr.size == 0:
-        return 0.0
-    return float(np.sqrt(np.mean(e_arr ** 2)))
-
-
 def compute_logit_gap_vector(t: Any) -> np.ndarray:
     """
     Compute the per‑token logit gap (difference between the top‑1 and
-    top‑2 log probabilities) from a trace.  A larger gap indicates the
-    model is more confident in its chosen token.
+    top‑2 log probabilities) from a trace.
     """
     t1 = np.array(t.get("top1_logprobs", []), dtype=float)
     t2 = np.array(t.get("top2_logprobs", []), dtype=float)
-    # handle missing or mismatched lengths gracefully
+    
+    # Handle missing or mismatched lengths gracefully
     if t1.size and t2.size and t1.size == t2.size:
         # Replace ‑inf in t2 with a large negative value so that the gap
         # remains finite.
@@ -61,32 +40,19 @@ def compute_logit_gap_vector(t: Any) -> np.ndarray:
 
 def compute_entropy_metrics(t: Any) -> Dict[str, float]:
     """
-    Aggregate entropic metrics from a trace.  Returns a dictionary
-    containing:
-
-      * saup_score       – square‑average uncertainty across the sequence
-      * avg_entropy      – mean token entropy
-      * min_logit_gap    – minimum logit gap across the sequence
-      * avg_logit_gap    – mean logit gap across the sequence
-
-    If the trace contains no entropy information, zeros are returned for all
-    metrics.
+    Aggregate entropic metrics from a trace.
     """
     e = t.get("entropies", [])
     g = compute_logit_gap_vector(t)
     if not e:
         return {
-            "saup_score": 0.0,
             "avg_entropy": 0.0,
             "min_logit_gap": 0.0,
-            "avg_logit_gap": 0.0,
         }
     e_arr = np.array(e, dtype=float)
     metrics = {
-        "saup_score": compute_saup_score(e_arr.tolist()),
         "avg_entropy": float(np.mean(e_arr)),
         "min_logit_gap": float(np.min(g)) if g.size else 0.0,
-        "avg_logit_gap": float(np.mean(g)) if g.size else 0.0,
     }
     return metrics
 
@@ -97,9 +63,7 @@ def compute_entropy_metrics(t: Any) -> Dict[str, float]:
 
 def _identify_stage_boundaries(text: str) -> List[tuple[int, int, str]]:
     """
-    Identify boundaries in a chain‑of‑thought style answer.  The
-    function looks for common step markers (e.g. “Step 1:”) and falls
-    back to splitting on newlines if none are found.
+    Identify boundaries in a chain‑of‑thought style answer.
     """
     pattern = re.compile(
         r"(?:^|\n)(?:Step\s+\d+[:.]|\d+\.|First,|Second,|Third,|Finally,)", re.I
@@ -127,13 +91,11 @@ def _map_tokens_to_stages(
 ) -> List[Dict[str, Any]]:
     """
     Aggregate entropic metrics for each identified reasoning stage.
-    Aligns token boundaries to character spans heuristically and then
-    computes average entropy, SAUP and minimum logit gap for each stage.
     """
     toks = t.get("tokens", [])
     if not toks:
         return []
-    # reconstruct character spans from tokens; handle common BPE artefacts
+    # reconstruct character spans from tokens
     char_spans: List[tuple[int, int]] = []
     idx = 0
     for tok in toks:
@@ -154,7 +116,6 @@ def _map_tokens_to_stages(
         idxs = [i for i, (a, b) in enumerate(char_spans) if b > s0 and a < s1]
         if not idxs:
             continue
-        # filter indices for which entropy and logit gap values exist
         se = [e[i] for i in idxs if i < len(e)]
         sg = [g[i] for i in idxs if i < len(g)]
         if not se:
@@ -164,7 +125,6 @@ def _map_tokens_to_stages(
                 "stage_name": name,
                 "token_count": len(idxs),
                 "avg_entropy": float(np.mean(se)),
-                "saup_score": compute_saup_score(se),
                 "min_logit_gap": float(np.min(sg)) if sg else 0.0,
             }
         )
@@ -173,9 +133,7 @@ def _map_tokens_to_stages(
 
 def parse_stages(t: Any) -> List[Dict[str, Any]]:
     """
-    Public entry point for stage‑wise analysis.  Given a trace with a
-    ``text`` field and token‑level metrics it returns a list of stage
-    summaries.
+    Public entry point for stage‑wise analysis.
     """
     text = t.get("text", "")
     if not text:
@@ -190,38 +148,19 @@ def parse_stages(t: Any) -> List[Dict[str, Any]]:
 
 def analyze_text_confidence(text: str) -> float:
     """
-    Detect lexical hedging in the supplied text.  The output is a
-    number between 0 and 1 representing how uncertain the wording
-    appears.  A larger score indicates more uncertainty.
-
-    This implementation uses a simple keyword based heuristic and does
-    not depend on large embedding models.
+    Detect lexical hedging in the supplied text.
     """
     if not text:
         return 0.0
     hedges = [
-        "might",
-        "perhaps",
-        "possibly",
-        "unclear",
-        "maybe",
-        "assume",
-        "unlikely",
-        "probably",
-        "guess",
-        "unsure",
-        "estimate",
-        "approximate",
-        "seems",
-        "appears",
-        "could",
-        "suggests",
+        "might", "perhaps", "possibly", "unclear", "maybe", "assume",
+        "unlikely", "probably", "guess", "unsure", "estimate",
+        "approximate", "seems", "appears", "could", "suggests",
     ]
     words = text.lower().split()
     if not words:
         return 0.0
     count = sum(1 for w in words if w in hedges)
-    # normalise by length with a scaling factor; cap at 1.0
     return min(1.0, count / (len(words) / 5 + 1))
 
 
@@ -231,21 +170,15 @@ def analyze_text_confidence(text: str) -> float:
 
 def extract_final_answer(text: str) -> str:
     """
-    Attempt to extract the final numeric answer from a long chain of
-    thought.  Handles GSM8K style `####` markers, LaTeX \boxed
-    answers and simple “The answer is ...” phrases.  Falls back to the
-    last number found in the text.
+    Attempt to extract the final numeric answer.
     """
     if not isinstance(text, str):
         return ""
-    # GSM8K style: answer is after a `####` delimiter
     if "####" in text:
         return text.split("####")[-1].strip()
-    # LaTeX boxed answers: \boxed{42}
     m = re.search(r"\\boxed\\{([^}]+)\\}", text)
     if m:
         return m.group(1).strip()
-    # Natural language phrases like “The answer is 42.”
     m = re.search(
         r"(?:Final Answer|The answer|Result)\s*(?:is|:|)\s*([0-9,]+(?:\.[0-9]+)?)",
         text,
@@ -253,7 +186,6 @@ def extract_final_answer(text: str) -> str:
     )
     if m:
         return m.group(1).replace(",", "").strip()
-    # Fallback: return the last number found
     nums = re.findall(r"[-+]?\d{1,3}(?:,\d{3})*(?:\.\d+)?", text)
     if nums:
         return nums[-1].replace(",", "").strip()
@@ -262,9 +194,7 @@ def extract_final_answer(text: str) -> str:
 
 def compute_semantic_entropy(traces: List[Any]) -> float:
     """
-    Compute the Shannon entropy of the distribution of answers across
-    multiple samples.  A value of zero means all samples agree; higher
-    values indicate disagreement.
+    Compute the Shannon entropy of the distribution of answers.
     """
     answers = [extract_final_answer(t.get("text", "")) for t in traces]
     answers = [a for a in answers if a]
@@ -276,29 +206,12 @@ def compute_semantic_entropy(traces: List[Any]) -> float:
     return -float(np.sum(plogp))
 
 
-def compute_semantic_divergence(traces: List[Any]) -> float:
-    """
-    Compute the ratio of unique answers to total answers.  This ranges
-    from zero (all answers identical) to one (all answers different).
-    """
-    answers = [extract_final_answer(t.get("text", "")) for t in traces]
-    answers = [a for a in answers if a]
-    if not answers:
-        return 0.0
-    return len(set(answers)) / float(len(answers))
-
-
 def llm_judge_correctness(
     question: str, gold: str, pred: str, agent: Optional[Any] = None
 ) -> bool:
     """
-    Judge whether a predicted answer matches the gold answer.  Exact
-    string matches and numeric equivalence are supported.  If an
-    optional ``agent`` is provided with a ``solve`` method, this
-    function can delegate the decision to a model.  External API calls
-    have been removed to keep the pipeline self contained.
+    Judge whether a predicted answer matches the gold answer.
     """
-    # Basic numeric or string equivalence
     if gold.strip() == pred.strip():
         return True
     try:
@@ -335,21 +248,13 @@ _CURRENT_CONFIG_PATH: Optional[str] = None
 
 def load_indices(custom_path: Optional[str] = None) -> None:
     """
-    Load the indices of entropy neurons from a JSON file.  The file
-    should contain a JSON array of integers.  A path can be supplied
-    explicitly via ``custom_path``.  The environment variable
-    ``UQ_NEURON_CONFIG`` will be consulted if no path is provided.
-
-    Loaded indices are cached globally to avoid reloading the same
-    configuration repeatedly.
+    Load the indices of entropy neurons from a JSON file.
     """
     global _ENTROPY_INDICES, _CURRENT_CONFIG_PATH
-    # Determine a default config path relative to this file
     default_path = os.path.abspath(
         os.path.join(os.path.dirname(__file__), "config/entropy_neurons_default.json")
     )
     p = custom_path or os.getenv("UQ_NEURON_CONFIG", default_path)
-    # If the path hasn't changed, reuse the cached indices
     if _ENTROPY_INDICES is not None and _CURRENT_CONFIG_PATH == p:
         return
     if p and os.path.exists(p):
@@ -360,45 +265,58 @@ def load_indices(custom_path: Optional[str] = None) -> None:
                 _ENTROPY_INDICES = np.array(data, dtype=int)
                 _CURRENT_CONFIG_PATH = p
             else:
-                raise ValueError("Config file must contain a JSON list of integers.")
-        except Exception as e:
-            print(f"Warning: failed to load neuron indices from {p}: {e}")
+                _ENTROPY_INDICES = np.array([], dtype=int)
+        except Exception:
             _ENTROPY_INDICES = np.array([], dtype=int)
-            _CURRENT_CONFIG_PATH = None
     else:
-        # no config found; fallback to empty indices
         _ENTROPY_INDICES = np.array([], dtype=int)
-        _CURRENT_CONFIG_PATH = None
 
 
-def get_mechanistic_score(a: Optional[np.ndarray]) -> float:
+def get_token_mechanistic_scores(a: Optional[np.ndarray]) -> np.ndarray:
     """
-    Compute a scalar mechanistic uncertainty score from a matrix of
-    activations.  The input ``a`` should be an array of shape
-    (T, H) where T is the number of generated tokens and H is the
-    hidden dimension.  The score is the mean activation of the
-    configured entropy neurons passed through a tanh squashing
-    function.
+    Compute mechanistic uncertainty score *per token*.
+    Returns a 1D array of shape (T,) where T is the number of tokens.
     """
     global _ENTROPY_INDICES
     if _ENTROPY_INDICES is None:
         load_indices()
-    # validate inputs
-    if not isinstance(a, np.ndarray) or a.size == 0 or _ENTROPY_INDICES.size == 0:
-        return 0.0
+    
+    # Validation
+    if a is None or not isinstance(a, np.ndarray) or a.size == 0 or _ENTROPY_INDICES.size == 0:
+        return np.array([])
+    
     try:
-        # ensure 2D
+        # Ensure 'a' is (T, H)
         if a.ndim == 1:
             a = a.reshape(1, -1)
+            
         max_dim = a.shape[-1]
         valid_indices = _ENTROPY_INDICES[_ENTROPY_INDICES < max_dim]
+        
         if valid_indices.size == 0:
-            return 0.0
+            return np.zeros(a.shape[0])
+            
+        # Select only entropy neurons -> Shape (T, k)
         r = a[:, valid_indices]
-        s = float(np.mean(r))
-        return float(np.tanh(s * 0.5))
+        
+        # Average across the neurons (axis 1) to get a score per token -> Shape (T,)
+        s = np.mean(r, axis=1)
+        
+        # Squashing function (tanh * 0.5)
+        return np.tanh(s * 0.5)
+        
     except Exception:
+        return np.array([])
+
+
+def get_mechanistic_score_summary(a: Optional[np.ndarray]) -> float:
+    """
+    Compute scalar mechanistic uncertainty score (average of token scores).
+    """
+    token_scores = get_token_mechanistic_scores(a)
+    if token_scores.size == 0:
         return 0.0
+    return float(np.mean(token_scores))
 
 
 # ---------------------------------------------------------------------------
@@ -409,25 +327,18 @@ def get_mechanistic_score(a: Optional[np.ndarray]) -> float:
 class UncertaintyVector:
     """
     Container for the components of a holistic uncertainty vector.
+    Cleaned of duplicates and unused fields.
     """
-
     avg_entropy: float
     min_logit_gap: float
-    saup_score: float
-    semantic_divergence: float
     semantic_entropy: float
     heuristic_score: float
     mechanistic_score: float
-    external_score: float = 0.0
-    textual_summary: str = ""
 
 
 class UncertaintyVectorComputer:
     """
-    Compute holistic uncertainty vectors from a list of generation
-    traces.  The first trace is considered the primary response; if
-    multiple traces are provided semantic uncertainty metrics will be
-    computed across them.
+    Compute holistic uncertainty vectors from generation traces.
     """
 
     def compute_vector_from_traces(
@@ -438,37 +349,84 @@ class UncertaintyVectorComputer:
         t0 = traces[0]
         # entropic metrics
         ent = compute_entropy_metrics(t0)
+        
         # semantic metrics (multi‑sample)
+        se = 0.0
         if len(traces) > 1:
-            sd = compute_semantic_divergence(traces)
             se = compute_semantic_entropy(traces)
-        else:
-            sd = 0.0
-            se = 0.0
+            
         # heuristic (hedging)
         h = analyze_text_confidence(t0.get("text", ""))
+        
         # mechanistic
         acts = t0.get("activations")
-        # convert lists to numpy if necessary
         if acts is not None and not isinstance(acts, np.ndarray):
             try:
                 acts = np.array(acts)
             except Exception:
                 acts = None
-        m = get_mechanistic_score(acts) if acts is not None else 0.0
+        m = get_mechanistic_score_summary(acts)
+
         return UncertaintyVector(
             avg_entropy=ent.get("avg_entropy", 0.0),
             min_logit_gap=ent.get("min_logit_gap", 0.0),
-            saup_score=ent.get("saup_score", 0.0),
-            semantic_divergence=sd,
             semantic_entropy=se,
             heuristic_score=h,
             mechanistic_score=m,
-            textual_summary="Computed",
         )
 
     def compute_stage_vectors(self, t: Any) -> List[Dict[str, Any]]:
         """
-        Compute per‑stage uncertainty summaries for a single trace.
+        Compute per‑stage uncertainty summaries.
         """
         return parse_stages(t)
+
+    def extract_token_metrics(self, t: Any) -> List[Dict[str, Any]]:
+        """
+        Extract granular token-by-token metrics for SQL logging.
+        Includes: Entropy, Logit Gap, Mechanistic Score.
+        """
+        tokens = t.get("tokens", [])
+        entropies = t.get("entropies", [])
+        top1 = t.get("top1_logprobs", [])
+        top2 = t.get("top2_logprobs", [])
+        
+        # Calculate derived vectors
+        gap_arr = compute_logit_gap_vector(t)
+        
+        acts = t.get("activations")
+        if acts is not None and not isinstance(acts, np.ndarray):
+            try:
+                acts = np.array(acts)
+            except Exception:
+                acts = None
+        mech_arr = get_token_mechanistic_scores(acts)
+
+        out = []
+        # Use length of tokens/entropies as baseline
+        length = min(len(tokens), len(entropies))
+        
+        for i in range(length):
+            clean_tok = (
+                tokens[i]
+                .replace("Ġ", " ")
+                .replace("Ċ", "\\n")
+                .replace("<0x0A>", "\\n")
+            )
+            
+            # Safe access handling
+            t1 = float(top1[i]) if i < len(top1) else 0.0
+            t2 = float(top2[i]) if i < len(top2) else -9999.0
+            gap = float(gap_arr[i]) if i < len(gap_arr) else 0.0
+            mech = float(mech_arr[i]) if (mech_arr.size > i) else 0.0
+
+            out.append({
+                "position": i,
+                "token": clean_tok,
+                "entropy": float(entropies[i]),
+                "top1_logprob": t1,
+                "top2_logprob": t2,
+                "logit_gap": gap,
+                "mechanistic_score": mech
+            })
+        return out

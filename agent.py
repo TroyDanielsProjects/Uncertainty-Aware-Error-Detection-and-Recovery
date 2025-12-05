@@ -1,21 +1,6 @@
 """
 Agent implementations for generating solutions and associated
 uncertainty metrics.
-
-This module consolidates the agent classes used by the main pipeline.
-It includes:
-
-  * Trace – a dataclass representing a single model generation with
-    token level information and optional activations.
-  * BaseAgent – an abstract base class defining the ``solve`` API.
-  * CoTAgent – a mockable chain‑of‑thought agent that can call an
-    external API or fall back to synthetic responses.
-  * HFAgent – a HuggingFace based agent capable of returning
-    entropic and mechanistic metrics via activation hooks.
-
-The original agent implementations were scattered across multiple
-modules; here they are rewritten in a single file and stripped of any
-package‑relative imports so they can be used directly.
 """
 
 from __future__ import annotations
@@ -25,14 +10,84 @@ import numpy as np
 from typing import List, Dict, Optional, Any
 from dataclasses import dataclass, field
 
-# ActivationMonitor is used by HFAgent to capture hidden activations.
-try:
-    from mechanistic_interpretability.activation_utils import ActivationMonitor  # type: ignore
-except ImportError:
-    ActivationMonitor = None  # type: ignore
+# --- INSERTED ACTIVATION MONITOR CLASS (No external file needed) ---
 
-# Optional external API client for CoTAgent.  If unavailable,
-# CoTAgent will fall back to mock responses.
+class ActivationMonitor:
+    """
+    Context manager to capture activations from the last MLP layer during generation.
+    This is crucial for Mechanistic UQ. It aims to capture the output of the 
+    activation function (input to the down projection Wout).
+    """
+    def __init__(self, model):
+        self.model = model
+        self.activations = []
+        self.hook = None
+        self.target_layer = None
+        self._locate_target_layer()
+
+    def _locate_target_layer(self):
+        # Generalized way to find the last MLP layer's activation function
+        try:
+            if hasattr(self.model, 'model') and hasattr(self.model.model, 'layers'):
+                # Llama/Mistral/DeepSeek style
+                # We hook the activation function (e.g., GeLU, SiLU) within the last MLP block.
+                self.target_layer = self.model.model.layers[-1].mlp.act_fn
+            elif hasattr(self.model, 'transformer') and hasattr(self.model.transformer, 'h'):
+                 # GPT-2 style (MLP structure is slightly different)
+                 self.target_layer = self.model.transformer.h[-1].mlp
+            else:
+                pass
+        except Exception:
+            pass
+
+    def _hook_fn(self, module, input, output):
+        # Output shape is typically [Batch, SeqLen, MLP_Dim].
+        # We only care about the activations for the newly generated token (the last one in SeqLen).
+        if output.ndim == 3:
+            self.activations.append(output[:, -1, :].detach().cpu())
+        elif output.ndim == 2:
+             self.activations.append(output.detach().cpu())
+
+    def __enter__(self):
+        if self.target_layer:
+            self.hook = self.target_layer.register_forward_hook(self._hook_fn)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.hook:
+            self.hook.remove()
+
+    def get_batch_activations(self, expected_batch_size=1, expected_seq_len=None):
+        """
+        Processes the stored activations after generation completes.
+        Reshapes the list of tensors into [Batch, Tokens, MLP_Dim].
+        """
+        # Default dim for 7B models if config access fails
+        d_mlp = 11008 
+        if hasattr(self.model, 'config'):
+             d_mlp = getattr(self.model.config, 'intermediate_size', d_mlp)
+             
+        seq_len = expected_seq_len if expected_seq_len is not None else 32
+
+        if self.activations:
+            try:
+                # Stack along a new dimension: [Tokens, Batch, MLP_Dim]
+                acts = torch.stack(self.activations, dim=0)
+                # Permute to: [Batch, Tokens, MLP_Dim]
+                acts = acts.permute(1, 0, 2).numpy()
+                
+                print(f"ActivationMonitor Success: Captured activations with shape {acts.shape}")
+                return acts
+            except Exception as e:
+                print(f"ActivationMonitor Error processing stack: {e}")
+
+        # Fallback: Return ZEROS (Safe, non-random) if capture failed
+        print("ActivationMonitor: Returning zero-filled tensor due to capture failure.")
+        return np.zeros((expected_batch_size, seq_len, d_mlp), dtype=np.float32)
+
+# -------------------------------------------------------------------
+
+# Optional external API client for CoTAgent.
 try:
     from openai import OpenAI  # type: ignore
     CLIENT: Optional[Any] = None
@@ -45,31 +100,21 @@ class Trace:
     """
     A structure holding the output and internal metrics of a generation.
     """
-
     text: str
     tokens: List[str] = field(default_factory=list)
     # Entropic UQ data
     entropies: List[float] = field(default_factory=list)
     top1_logprobs: List[float] = field(default_factory=list)
     top2_logprobs: List[float] = field(default_factory=list)
-    # Mechanistic UQ data (activations from the last MLP layer).
+    # Mechanistic UQ data
     activations: Optional[np.ndarray] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def get(self, key: str, default: Any = None) -> Any:
-        """
-        Dictionary‑like accessor for compatibility with the UQ framework.
-        """
         return getattr(self, key, default)
 
 
 class BaseAgent:
-    """
-    Abstract base class for language model agents.  Subclasses must
-    implement the ``solve`` method which generates one or more
-    ``Trace`` objects for a given task.
-    """
-
     def __init__(self, model_name: str):
         self.model_name = model_name
 
@@ -83,39 +128,26 @@ class BaseAgent:
 class CoTAgent(BaseAgent):
     """
     Agent utilizing chain‑of‑thought prompting via an external API.
-    If the API client is unavailable (no OpenAI key) the agent will
-    return synthetic traces for testing.
     """
-
     def __init__(self, model: str = "gpt-4o-mini"):
         super().__init__(model_name=model)
         self.client: Optional[Any] = CLIENT
         if self.client is None:
-            # no API client – operate in mock mode
             print(f"Info: OpenAI client not initialized for {model}. CoTAgent will use mock responses.")
 
     def _entropy(self, logprobs: np.ndarray) -> float:
-        """
-        Compute the Shannon entropy of a set of log probabilities.
-        """
         p = np.exp(logprobs)
         p_sum = np.sum(p)
-        if p_sum > 0:
-            p = p / p_sum
+        if p_sum > 0: p = p / p_sum
         plogp = np.where(p > 0, p * np.log(p), 0)
         return -float(np.sum(plogp))
 
     def _mock(self, task: str, n: int) -> List[Trace]:
-        """
-        Generate deterministic mock responses when the API is not available.
-        """
         text = f"Step 1: Analyze '{task[:50]}...'. Step 2: Calculation 10*5=50. Step 3: Review. The final answer is 42."
         toks = text.split()
-        # synthetic entropies and logprobs
         ent = (np.random.rand(len(toks)) * 1.0 + 0.1).tolist()
         t1 = (-np.random.rand(len(toks)) * 0.2 - 0.05).tolist()
         t2 = [(a - (np.random.rand() * 1.5 + 0.5)) for a in t1]
-        # synthetic activations (T, H) with a standard hidden dim
         D_MLP = 14336
         acts = np.random.randn(len(toks), D_MLP).astype(np.float32) * 0.5 - 0.1
         return [
@@ -126,7 +158,6 @@ class CoTAgent(BaseAgent):
     def solve(self, task: str, n_samples: int = 1) -> List[Trace]:
         if self.client is None:
             return self._mock(task, n_samples)
-        # build a prompt for the API
         prompt = (
             "Solve the following problem step‑by‑step.\n"
             f"Question: {task}\n"
@@ -147,8 +178,7 @@ class CoTAgent(BaseAgent):
         out: List[Trace] = []
         for c in r.choices:
             lp = getattr(c, "logprobs", None)
-            if not lp or not lp.content:
-                continue
+            if not lp or not lp.content: continue
             toks: List[str] = []
             ents: List[float] = []
             t1: List[float] = []
@@ -174,9 +204,8 @@ class CoTAgent(BaseAgent):
 
 class HFAgent(BaseAgent):
     """
-    Optimized HFAgent that offloads measurement math to CPU to avoid MPS stalls.
+    Optimized HFAgent with integrated ActivationMonitor.
     """
-
     def __init__(self, model_name: str = "meta-llama/Meta-Llama-3-8B-Instruct", device: Optional[str] = None):
         super().__init__(model_name)
         self.model_name = model_name
@@ -184,7 +213,6 @@ class HFAgent(BaseAgent):
         self.model: Optional[Any] = None
         self.tokenizer: Optional[Any] = None
         
-        # determine device
         if device:
             self.device = device
         elif torch.cuda.is_available():
@@ -208,7 +236,6 @@ class HFAgent(BaseAgent):
             if self.tokenizer.pad_token_id is None:
                 self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
             
-            # STRICT TYPES: Use float16 for MPS/CUDA. Do NOT use 4-bit/8-bit on Mac.
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_name,
                 torch_dtype=torch.float16,
@@ -223,28 +250,19 @@ class HFAgent(BaseAgent):
             self.model = None
 
     def _compute_batch_entropy(self, scores: List[torch.Tensor]) -> tuple[np.ndarray, np.ndarray]:
-            """
-            FIXED & OPTIMIZED: Computes entropy on GPU and permutes BEFORE cpu conversion.
-            """
             with torch.no_grad():
-                # 1. Stack on device (T, B, V)
                 logits = torch.stack(scores) 
-                
-                # 2. Compute Probabilities & Entropy on GPU
                 logp = torch.log_softmax(logits, dim=-1)
                 p = logp.exp()
                 plogp = p * logp
                 plogp = torch.nan_to_num(plogp, nan=0.0)
                 
-                # Reduce to scalar metrics (T, B) -> (B, T)
                 ent_device = -torch.sum(plogp, dim=-1)
-                ent_device = ent_device.permute(1, 0) # <--- Permute here (PyTorch)
+                ent_device = ent_device.permute(1, 0)
                 
-                # TopK on device (T, B, K) -> (B, T, K)
                 topk_vals_device = torch.topk(logp, 2, dim=-1).values
-                topk_vals_device = topk_vals_device.permute(1, 0, 2) # <--- Permute here (PyTorch)
+                topk_vals_device = topk_vals_device.permute(1, 0, 2)
 
-                # 3. Move ONLY the results to CPU
                 ent = ent_device.cpu().float().numpy()
                 topk = topk_vals_device.cpu().float().numpy()
 
@@ -277,13 +295,12 @@ class HFAgent(BaseAgent):
             "temperature": 0.7 if n_samples > 1 else None,
             "top_p": 0.9 if n_samples > 1 else None,
             "return_dict_in_generate": True,
-            "output_scores": True, # Required for measurement
+            "output_scores": True, 
             "pad_token_id": self.tokenizer.pad_token_id,
         }
 
-        # Handle Mechanistic Capture
-        # NOTE: If ActivationMonitor is slow, this block is the cause. 
-        monitor = ActivationMonitor(self.model) if ActivationMonitor else None
+        # Use integrated Monitor
+        monitor = ActivationMonitor(self.model)
         
         try:
             if monitor: monitor.__enter__()
@@ -295,20 +312,14 @@ class HFAgent(BaseAgent):
         finally:
             if monitor: monitor.__exit__(None, None, None)
 
-        # Process Results
         seq = out.sequences[:, base_len:]
         texts = self.tokenizer.batch_decode(seq, skip_special_tokens=True)
         seq_len = seq.shape[1]
         
-        # MEASUREMENT STEP (Now optimized)
         ent, topk = self._compute_batch_entropy(out.scores)
         
-        # Retrieve activations (Ensure this doesn't leak memory)
-        if monitor and hasattr(monitor, "get_batch_activations"):
-            # This might be moving things to CPU, which is good
-            acts_batch = monitor.get_batch_activations(expected_batch_size=n_samples, expected_seq_len=seq_len)
-        else:
-            acts_batch = None
+        # Retrieve activations
+        acts_batch = monitor.get_batch_activations(expected_batch_size=n_samples, expected_seq_len=seq_len)
             
         traces: List[Trace] = []
         for i in range(n_samples):
@@ -317,7 +328,6 @@ class HFAgent(BaseAgent):
             
             acts_i = None
             if acts_batch is not None and i < len(acts_batch) and acts_batch[i] is not None:
-                # Ensure acts are numpy
                 a = acts_batch[i]
                 if hasattr(a, 'cpu'): a = a.cpu().numpy()
                 if T <= a.shape[0]:
@@ -335,6 +345,5 @@ class HFAgent(BaseAgent):
                     activations=acts_i,
                 )
             )
-            
             
         return traces
