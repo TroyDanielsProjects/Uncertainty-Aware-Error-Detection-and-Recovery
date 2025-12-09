@@ -1,6 +1,6 @@
 """
-SQLite database manager. 
-Updated schema to support local LLM grading.
+SQLite database manager.
+Schema updated to support Phase 1 (Generation) and Phase 2 (Grading/Analysis).
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ class DBManager:
     def get_connection(self) -> Optional[sqlite3.Connection]:
         try:
             conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row  # Access columns by name
             conn.execute("PRAGMA foreign_keys = ON;")
             conn.execute("PRAGMA journal_mode = WAL;") 
             return conn
@@ -54,17 +55,18 @@ class DBManager:
             model_id INTEGER,
             question_id_external TEXT,
             sample_index INTEGER,
+            
+            -- DATA
             question_text TEXT,
             gold_answer TEXT,
             predicted_answer TEXT,
-            
-            -- JUDGEMENT COLUMNS
-            is_correct BOOLEAN,
-            eval_reason TEXT,     -- Explanation from Llama/Local Grader
-            eval_method TEXT,     -- 'Exact Match' or 'Model: Llama-3-8B'
-            
             full_trace_text TEXT,
             trace_file_path TEXT,
+            
+            -- JUDGEMENT
+            is_correct BOOLEAN,     -- 1 (True), 0 (False)
+            eval_reason TEXT,       -- Explanation (e.g., from GPT-4 or 'Exact Match')
+            eval_method TEXT,       -- Who judged it? (e.g., 'Exact Match', 'gpt-4o')
             
             -- METRICS
             uq_mech_score REAL,
@@ -111,7 +113,8 @@ class DBManager:
         finally:
             conn.close()
 
-    # --- REGISTRATION METHODS (Unchanged) ---
+    # --- REGISTRATION ---
+
     def register_model(self, model_name: str, architecture: str = None, training_method: str = None, mech_config: str = None) -> Optional[int]:
         conn = self.get_connection()
         if not conn: return None
@@ -142,8 +145,13 @@ class DBManager:
         finally:
             conn.close()
 
-    # --- LOGGING METHODS ---
+    # --- LOGGING & UPDATING ---
+
     def log_result(self, experiment_id: int, model_id: int, q_data: Dict[str, Any], p_data: Dict[str, Any], uq: Any, trace_path: str = None, sample_index: int = 0) -> Optional[int]:
+        """
+        Logs the initial generation result (Phase 1).
+        'eval_reason' and 'eval_method' can be set here if Exact Match logic is used.
+        """
         conn = self.get_connection()
         if not conn: return None
         cursor = conn.cursor()
@@ -177,7 +185,9 @@ class DBManager:
             conn.close()
 
     def update_grading(self, result_id: int, is_correct: bool, reason: str, method: str) -> None:
-        """New method to update a row after the grader runs."""
+        """
+        Phase 2 Update: Used by the offline computer (grader) to fill in judgment details.
+        """
         conn = self.get_connection()
         if not conn: return
         cursor = conn.cursor()
@@ -187,21 +197,31 @@ class DBManager:
                 (is_correct, reason, method, result_id)
             )
             conn.commit()
+        except sqlite3.Error as e:
+            print(f"Error updating grading for {result_id}: {e}")
         finally:
             conn.close()
 
-    def get_ungraded_results(self, experiment_id: int) -> List[Any]:
-        """Fetch results where is_correct is possibly ambiguous (or fetch all if needed)."""
+    def get_ungraded_results(self, experiment_id: int) -> List[sqlite3.Row]:
+        """
+        Fetches results that might need grading (e.g. where is_correct is False or eval_method is 'Pending').
+        """
         conn = self.get_connection()
         if not conn: return []
-        # We fetch everything so we can decide in python which to skip (e.g. Exact Matches)
-        df = conn.execute(f"SELECT result_id, question_text, gold_answer, predicted_answer, full_trace_text, eval_method FROM Results WHERE experiment_id = {experiment_id}").fetchall()
-        conn.close()
-        return df
+        try:
+            # We use parameterized queries for safety
+            cursor = conn.execute(
+                "SELECT result_id, question_text, gold_answer, predicted_answer, full_trace_text, eval_method, is_correct FROM Results WHERE experiment_id = ?", 
+                (experiment_id,)
+            )
+            return cursor.fetchall()
+        finally:
+            conn.close()
 
-    # (Keep log_stage_results and log_token_metrics unchanged)
+    # --- GRANULAR METRICS ---
+
     def log_stage_results(self, result_id: int, stage_data: List[Dict[str, Any]]) -> None:
-        conn = self.get_connection(); 
+        conn = self.get_connection()
         if not conn: return
         try:
             rows = [(result_id, i, s['stage_name'], s['token_count'], s['avg_entropy'], s['min_logit_gap']) for i, s in enumerate(stage_data)]
@@ -210,7 +230,7 @@ class DBManager:
         finally: conn.close()
 
     def log_token_metrics(self, result_id: int, token_data: List[Dict[str, Any]]) -> None:
-        conn = self.get_connection(); 
+        conn = self.get_connection()
         if not conn: return
         try:
             rows = [(result_id, t['position'], t['token'], t['entropy'], t['top1_logprob'], t['top2_logprob'], t['logit_gap'], t['mechanistic_score']) for t in token_data]
