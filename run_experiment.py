@@ -252,7 +252,7 @@ if __name__ == "__main__":
         "experiment_name": "HUV_DeepSeek_AgentJudge",
         "version": "1.3.1",
         "dataset": "gsm8k",
-        "data_limit": 3,
+        "data_limit": 50,
         "n_samples": 3,
         "db_path": "db/results.sqlite",
         "analyze_stages": True,
