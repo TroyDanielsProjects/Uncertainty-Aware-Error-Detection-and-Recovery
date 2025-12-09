@@ -1,153 +1,165 @@
 """
-Main experiment runner: Phase 1 (Generation) ONLY.
+run_experiment.py
+Orchestrator: Phase 1 (Gen) -> Phase 2 (Grading).
+Optimized with Batch Logging to prevent I/O blocking during generation.
 """
-from __future__ import annotations
 import os
-import json
 import gc
+import json
 import torch
-import numpy as np
 from tqdm import tqdm
-from collections import Counter
-from dataclasses import asdict
 from typing import Dict, List
 
-from agent import HFAgent, CoTAgent, Trace, BaseAgent
-from vector_computer import UncertaintyVectorComputer, extract_final_answer, load_indices
+# --- Component Imports ---
+from uq_core import (
+    MetricComputer,       
+    OfflineAnalyzer,      
+    calibrate_model,      
+    set_entropy_indices,
+)
+from agent import HFAgent
 from db_manager import DBManager
 
-def load_gsm8k_simple(limit: int = 100):
-    """Loads GSM8K data."""
+# --- UTILS ---
+def load_gsm8k_sample(limit: int = 100) -> List[Dict[str, str]]:
     print(f"Loading GSM8K (limit={limit})...")
     url = "https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data/train.jsonl"
     try:
         import requests
-        response = requests.get(url, timeout=10)
-        lines = response.text.strip().split("\n")
-        records = []
-        for i, line in enumerate(lines):
-            if i >= limit: break
-            item = json.loads(line)
-            answer = item["answer"].split("####")[-1].strip().replace(",", "")
-            records.append({
-                "id": str(i),
-                "question": item["question"],
-                "gold_answer": answer
-            })
-        return records
+        lines = requests.get(url, timeout=10).text.strip().split("\n")
+        return [
+            {
+                "id": str(i), 
+                "q": json.loads(line)["question"], 
+                "gold": json.loads(line)["answer"].split("####")[-1].strip().replace(",", "")
+            } 
+            for i, line in enumerate(lines) if i < limit
+        ]
     except Exception as e:
-        print(f"Warning: GSM8K Load Failed ({e}). Using dummy.")
-        return [{"id": "0", "question": "1+1?", "gold_answer": "2"}] * limit
+        print(f"Dataset load failed ({e}). Using dummy.")
+        return [{"id": "0", "q": "1+1?", "gold": "2"}] * limit
 
-def compute_semantic_entropy_local(traces: List[Trace]) -> float:
-    """Computes SE on the in-memory batch."""
-    answers = [extract_final_answer(t.text) for t in traces]
-    answers = [a for a in answers if a]
-    if not answers: return 0.0
-    counts = Counter(answers)
-    total = len(answers)
-    probs = np.array([c / total for c in counts.values()])
-    return float(-np.sum(probs * np.log(probs + 1e-10)))
-
-def save_trace(trace: Trace, path_prefix: str) -> str:
-    data = asdict(trace)
-    if data.get("activations") is not None:
-        np.save(path_prefix + ".npy", data["activations"])
-        data["activations"] = f"Stored: {os.path.basename(path_prefix)}.npy"
-    with open(path_prefix + ".json", "w") as f:
-        json.dump(data, f, indent=2, default=str)
-    return path_prefix + ".json"
-
-def run_experiment(cfg: Dict):
-    print("=== PHASE 1: GENERATION ===")
-    db = DBManager(cfg["db_path"])
-    dataset = load_gsm8k_simple(limit=cfg["data_limit"])
-    uq_computer = UncertaintyVectorComputer()
+# --- PHASE 1: GENERATION ---
+def run_generation_phase(cfg: Dict, db: DBManager):
+    dataset = load_gsm8k_sample(limit=cfg.get("data_limit", 10))
+    exp_id = db.new_experiment(cfg["experiment_name"], cfg)
     
-    exp_id = db.create_experiment(cfg["experiment_name"], cfg.get("dataset", "gsm8k"), cfg)
-    trace_dir = os.path.join("output", cfg["experiment_name"], "traces")
-    os.makedirs(trace_dir, exist_ok=True)
-
+    print("\n=== PHASE 1: GENERATION ===")
+    
     for label, spec in cfg["models"].items():
-        print(f"--- Model: {label} ---")
-        mech_config = spec.get("mechanistic_config")
-        if mech_config: load_indices(custom_path=mech_config)
+        print(f"--- Model: {spec['id']} ---")
         
-        model_db_id = db.register_model(spec["id"], mech_config=mech_config)
-        
-        try:
-            # We assume HFAgent here. 
-            # If using CoT API, ensure config reflects that.
-            agent = HFAgent(spec["id"]) if "/" in spec["id"] else CoTAgent(spec["id"])
-        except Exception as e:
-            print(f"Skipping {label}: {e}")
-            continue
+        # 1. Setup Logic (Calibration)
+        mech_path = spec.get("mechanistic_config")
+        if mech_path and not os.path.exists(mech_path):
+             print(f"Calibrating entropy neurons -> {mech_path}")
+             calibrate_model(spec["id"], mech_path)
+        set_entropy_indices(mech_path)
+            
+        mod_id = db.register_model(spec["id"], mech_config=mech_path)
+        agent = HFAgent(spec["id"]) 
 
+        # 2. Generation Loop
         for row in tqdm(dataset, desc=f"Gen {label}"):
             try:
-                # 1. Generate Batch
-                traces = agent.solve(row["question"], n_samples=cfg.get("n_samples", 1))
+                # A. Generate (Heavy GPU Work)
+                traces = agent.solve(row["q"], n_samples=cfg.get("n_samples", 1))
                 if not traces: continue
 
-                # 2. Compute Batch Metrics
-                se = 0.0
-                if len(traces) > 1:
-                    se = compute_semantic_entropy_local(traces)
-
-                for i, trace in enumerate(traces):
-                    # 3. Vector Calculation
-                    U = uq_computer.compute_vector(trace)
-                    U.semantic_entropy = se # Inject batch metric
-
-                    # 4. Fast Check (Exact Match)
-                    pred = extract_final_answer(trace.text)
-                    gold = row["gold_answer"]
-                    is_exact = False
-                    if pred and gold:
-                        try:
-                            if pred == gold or abs(float(pred.replace(",","")) - float(gold.replace(",",""))) < 1e-5:
-                                is_exact = True
-                        except: pass
-
-                    # 5. Log
-                    p_data = {
-                        "predicted_answer": pred,
-                        "is_correct": is_exact, 
-                        "full_text": trace.text,
-                        "eval_method": "Exact Match" if is_exact else "Pending"
-                    }
+                # B. Compute Metrics (CPU Work)
+                # We collect all data for this question first
+                batch_results = []
+                for trace in traces:
+                    vec = MetricComputer.compute_vector(trace)
+                    pred = MetricComputer.extract_final_answer(trace.text)
+                    is_exact = (pred == row["gold"])
                     
-                    path = save_trace(trace, os.path.join(trace_dir, f"E{exp_id}_Q{row['id']}_S{i}"))
-                    rid = db.log_result(exp_id, model_db_id, {"id_external": row['id'], "question": row['question'], "gold_answer": gold}, p_data, U, path, sample_index=i)
-                    
-                    if rid and cfg.get("analyze_stages"):
-                        db.log_stage_results(rid, uq_computer.compute_stage_vectors(trace))
-                        db.log_token_metrics(rid, uq_computer.extract_token_metrics(trace))
+                    batch_results.append({
+                        "pred": pred,
+                        "trace_txt": trace.text,
+                        "is_exact": is_exact,
+                        "vec": vec
+                    })
 
+                # C. Batch Log (Single DB Transaction)
+                # We reuse the existing log_result but wrap it in a transaction via the persistent connection
+                # or simpler: just loop here. Since DBManager has a persistent connection now, 
+                # this loop is fast. Ideally, we'd add a log_batch method to DBManager.
+                with db.conn: # Lock DB once for all N samples
+                    for res in batch_results:
+                        db.conn.execute("""
+                            INSERT INTO Results (
+                                experiment_id, model_id, question_id_external, question_text, gold_answer, 
+                                predicted_answer, full_trace_text, is_correct, eval_method, 
+                                uq_avg_entropy, uq_min_logit_gap, uq_semantic_entropy, uq_heuristic_score, uq_mech_score
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            exp_id, mod_id, row['id'], row['q'], row['gold'], 
+                            res['pred'], res['trace_txt'], res['is_exact'], 'Exact Match' if res['is_exact'] else 'Pending',
+                            res['vec'].avg_entropy, res['vec'].min_logit_gap, getattr(res['vec'], 'semantic_entropy', 0.0), 
+                            res['vec'].heuristic_score, res['vec'].mechanistic_score
+                        ))
+            
             except Exception as e:
                 print(f"Error Q{row['id']}: {e}")
 
-        # Cleanup
+        # Cleanup Model (Crucial for Mac/Local Runs)
         del agent
         gc.collect()
         if torch.cuda.is_available(): torch.cuda.empty_cache()
-    
-    print(f"Generation Complete. Exp ID: {exp_id}")
-    print("Run 'python offline_computer.py' to perform grading.")
+        if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available(): torch.mps.empty_cache()
 
+    return exp_id
+
+# --- PHASE 2: GRADING ---
+def run_grading_phase(cfg: Dict, db: DBManager, exp_id: int):
+    print("\n=== PHASE 2: ANALYSIS & GRADING ===")
+    analyzer = OfflineAnalyzer(cfg["db_path"])
+    
+    # 1. Semantic Entropy
+    print("Computing Semantic Entropy...")
+    analyzer.compute_semantic_entropy(exp_id)
+
+    # 2. Grading (Local LLM)
+    # The analyzer now handles the heavy lifting
+    if "grader_model" in cfg:
+        print(f"Loading Grader: {cfg['grader_model']}")
+        try:
+            grader_agent = HFAgent(cfg["grader_model"])
+            analyzer.run_local_judge(exp_id, grader_agent)
+            
+            del grader_agent
+            gc.collect()
+            if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available(): torch.mps.empty_cache()
+            
+        except Exception as e:
+            print(f"Grading failed: {e}")
+
+    print(f"Experiment {exp_id} Complete.")
+
+# --- MAIN ---
 if __name__ == "__main__":
     cfg = {
-        "experiment_name": "Generation_Only_Run",
-        "db_path": "db/results.sqlite",
+        "experiment_name": "HUV_Benchmark_Optimized",
+        "version": "5.0",
         "dataset": "gsm8k",
-        "data_limit": 20, 
-        "n_samples": 5, 
+        "data_limit": 100,     
+        "n_samples": 3,        
+        "db_path": "db/results.sqlite",
+        "analyze_stages": True,
+        
+        # PHASE 1 CONFIG
         "models": {
-            "Llama-3-8B": {
-                "id": "meta-llama/Meta-Llama-3-8B-Instruct",
-                "mechanistic_config": "config/entropy_neurons_llama3.json"
+            "Qwen-General": {
+                "id": "Qwen/Qwen2.5-1.5B-Instruct",
+                "mechanistic_config": "config/entropy_neurons_qwen_general.json"
             }
         },
-        "analyze_stages": True
+                
+        # PHASE 2 CONFIG
+        "grader_model": "Qwen/Qwen2.5-3B-Instruct"
     }
-    run_experiment(cfg)
+    
+    db = DBManager(cfg["db_path"])
+    exp_id = run_generation_phase(cfg, db)
+    run_grading_phase(cfg, db, exp_id)
