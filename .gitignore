@@ -9,13 +9,17 @@ __pycache__/
 # Experiment outputs
 output/
 outputs/
-
+db/
+gpt_inputs
 # Model weights / HF caches
 *.pt
 *.bin
 *.safetensors
 huggingface/
 hf_cache/
+*.png
+*.sqlite
+
 
 # Transformers / local model dirs
 models/

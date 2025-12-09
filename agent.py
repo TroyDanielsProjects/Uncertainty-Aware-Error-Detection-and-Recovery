@@ -29,7 +29,7 @@ class ActivationMonitor:
         # Generalized way to find the last MLP layer's activation function
         try:
             if hasattr(self.model, 'model') and hasattr(self.model.model, 'layers'):
-                # Llama/Mistral/DeepSeek style
+                # Llama/Mistral/DeepSeek/Qwen style
                 # We hook the activation function (e.g., GeLU, SiLU) within the last MLP block.
                 self.target_layer = self.model.model.layers[-1].mlp.act_fn
             elif hasattr(self.model, 'transformer') and hasattr(self.model.transformer, 'h'):
@@ -118,7 +118,7 @@ class BaseAgent:
     def __init__(self, model_name: str):
         self.model_name = model_name
 
-    def solve(self, task: str, n_samples: int = 1) -> List[Trace]:
+    def solve(self, task: str, n_samples: int = 1, capture_activations: bool = True) -> List[Trace]:
         raise NotImplementedError("The 'solve' method must be implemented by subclasses.")
 
     def __repr__(self) -> str:
@@ -155,7 +155,8 @@ class CoTAgent(BaseAgent):
             for _ in range(n)
         ]
 
-    def solve(self, task: str, n_samples: int = 1) -> List[Trace]:
+    def solve(self, task: str, n_samples: int = 1, capture_activations: bool = False) -> List[Trace]:
+        # CoTAgent (API) cannot capture mechanistic activations, so capture_activations arg is ignored but kept for signature compatibility
         if self.client is None:
             return self._mock(task, n_samples)
         prompt = (
@@ -272,7 +273,7 @@ class HFAgent(BaseAgent):
         mock_agent = CoTAgent(model="mock")
         return mock_agent._mock(task, n_samples)
 
-    def solve(self, task: str, n_samples: int = 1) -> List[Trace]:
+    def solve(self, task: str, n_samples: int = 1, capture_activations: bool = True) -> List[Trace]:
         if self.model is None or self.tokenizer is None:
             return self._mock_solve(task, n_samples)
             
@@ -299,8 +300,8 @@ class HFAgent(BaseAgent):
             "pad_token_id": self.tokenizer.pad_token_id,
         }
 
-        # Use integrated Monitor
-        monitor = ActivationMonitor(self.model)
+        # Use integrated Monitor ONLY if requested
+        monitor = ActivationMonitor(self.model) if capture_activations else None
         
         try:
             if monitor: monitor.__enter__()
@@ -318,8 +319,10 @@ class HFAgent(BaseAgent):
         
         ent, topk = self._compute_batch_entropy(out.scores)
         
-        # Retrieve activations
-        acts_batch = monitor.get_batch_activations(expected_batch_size=n_samples, expected_seq_len=seq_len)
+        # Retrieve activations ONLY if monitor was active
+        acts_batch = None
+        if monitor:
+            acts_batch = monitor.get_batch_activations(expected_batch_size=n_samples, expected_seq_len=seq_len)
             
         traces: List[Trace] = []
         for i in range(n_samples):
