@@ -81,24 +81,18 @@ def run_generation_phase(cfg: Dict, db: DBManager):
                         "vec": vec
                     })
 
-                # C. Batch Log (Single DB Transaction)
-                # We reuse the existing log_result but wrap it in a transaction via the persistent connection
-                # or simpler: just loop here. Since DBManager has a persistent connection now, 
-                # this loop is fast. Ideally, we'd add a log_batch method to DBManager.
-                with db.conn: # Lock DB once for all N samples
-                    for res in batch_results:
-                        db.conn.execute("""
-                            INSERT INTO Results (
-                                experiment_id, model_id, question_id_external, question_text, gold_answer, 
-                                predicted_answer, full_trace_text, is_correct, eval_method, 
-                                uq_avg_entropy, uq_min_logit_gap, uq_semantic_entropy, uq_heuristic_score, uq_mech_score
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """, (
-                            exp_id, mod_id, row['id'], row['q'], row['gold'], 
-                            res['pred'], res['trace_txt'], res['is_exact'], 'Exact Match' if res['is_exact'] else 'Pending',
-                            res['vec'].avg_entropy, res['vec'].min_logit_gap, getattr(res['vec'], 'semantic_entropy', 0.0), 
-                            res['vec'].heuristic_score, res['vec'].mechanistic_score
-                        ))
+                # C. Batch Log
+                # Use the helper method so it handles the new JSON trace columns automatically
+                for res in batch_results:
+                    db.log_result(
+                        exp_id, 
+                        mod_id, 
+                        row,            # Passes dictionary with 'id', 'q', 'gold'
+                        res['pred'], 
+                        res['trace_txt'], 
+                        res['is_exact'], 
+                        res['vec']      # Passes the UncertaintyVector with traces
+                    )
             
             except Exception as e:
                 print(f"Error Q{row['id']}: {e}")
@@ -143,8 +137,8 @@ if __name__ == "__main__":
         "experiment_name": "HUV_Benchmark_Optimized",
         "version": "5.0",
         "dataset": "gsm8k",
-        "data_limit": 100,     
-        "n_samples": 3,        
+        "data_limit": 1000,     
+        "n_samples": 4,        
         "db_path": "db/results.sqlite",
         "analyze_stages": True,
         

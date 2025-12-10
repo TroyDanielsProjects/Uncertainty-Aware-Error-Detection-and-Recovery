@@ -23,6 +23,7 @@ class DBManager:
             self.conn.close()
 
     def _init_db(self):
+        # CHANGED: Added uq_mech_trace, uq_entropy_trace, uq_logit_gap_trace, gen_len
         schema = """
         CREATE TABLE IF NOT EXISTS Experiments (
             experiment_id INTEGER PRIMARY KEY, name TEXT, config TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -37,7 +38,8 @@ class DBManager:
             gold_answer TEXT, predicted_answer TEXT, full_trace_text TEXT, 
             is_correct BOOLEAN, eval_method TEXT, gpt_eval_reason TEXT,
             uq_avg_entropy REAL, uq_min_logit_gap REAL, 
-            uq_semantic_entropy REAL, uq_heuristic_score REAL, uq_mech_score REAL
+            uq_semantic_entropy REAL, uq_heuristic_score REAL, uq_mech_score REAL,
+            uq_mech_trace TEXT, uq_entropy_trace TEXT, uq_logit_gap_trace TEXT, gen_len INTEGER
         );
         """
         try:
@@ -58,16 +60,23 @@ class DBManager:
             return self.conn.execute("SELECT model_id FROM Models WHERE name = ?", (name,)).fetchone()[0]
 
     def log_result(self, exp_id: int, mod_id: int, q_data: Dict, pred: str, trace_txt: str, is_corr: bool, uq: Any):
+        # CHANGED: Added 4 new columns to INSERT and VALUES
         with self.conn:
             self.conn.execute("""
                 INSERT INTO Results (
                     experiment_id, model_id, question_id_external, question_text, gold_answer, 
                     predicted_answer, full_trace_text, is_correct, eval_method, 
-                    uq_avg_entropy, uq_min_logit_gap, uq_semantic_entropy, uq_heuristic_score, uq_mech_score
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    uq_avg_entropy, uq_min_logit_gap, uq_semantic_entropy, uq_heuristic_score, 
+                    uq_mech_score, uq_mech_trace, uq_entropy_trace, uq_logit_gap_trace, gen_len
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 exp_id, mod_id, q_data['id'], q_data['q'], q_data['gold'], 
                 pred, trace_txt, is_corr, 'Exact Match' if is_corr else 'Pending',
                 uq.avg_entropy, uq.min_logit_gap, getattr(uq, 'semantic_entropy', 0.0), 
-                uq.heuristic_score, uq.mechanistic_score
+                uq.heuristic_score, uq.mechanistic_score,
+                # NEW VALUES:
+                json.dumps(uq.mech_trace), 
+                json.dumps(uq.entropy_trace), 
+                json.dumps(uq.logit_gap_trace), 
+                uq.num_tokens
             ))
