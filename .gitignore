@@ -33,3 +33,4 @@ config/*.json
 .vscode/
 .idea/
 *.swp
+db/results.sqlite
