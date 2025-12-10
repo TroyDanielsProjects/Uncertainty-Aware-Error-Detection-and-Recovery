@@ -77,6 +77,7 @@ class UncertaintyVector:
     entropy_trace: List[float] = field(default_factory=list)
     logit_gap_trace: List[float] = field(default_factory=list)
     num_tokens: int = 0
+    tokens: List[str] = field(default_factory=list)
 
 # --- 4. Inference Monitoring ---
 class ActivationMonitor:
@@ -204,7 +205,8 @@ class MetricComputer:
             mech_trace=mech_raw,
             entropy_trace=trace.entropies,
             logit_gap_trace=gap.tolist(),
-            num_tokens=len(trace.tokens)
+            num_tokens=len(trace.tokens),
+            tokens=trace.tokens,
         )
 
 # --- 6. Offline Analysis (Batch & Grading) ---
