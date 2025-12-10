@@ -72,6 +72,12 @@ class UncertaintyVector:
     heuristic_score: float
     mechanistic_score: float
     semantic_entropy: float = 0.0
+    # --- NEW FIELDS ---
+    mech_trace: List[float] = field(default_factory=list)
+    entropy_trace: List[float] = field(default_factory=list)
+    logit_gap_trace: List[float] = field(default_factory=list)
+    num_tokens: int = 0
+    tokens: List[str] = field(default_factory=list)
 
 # --- 4. Inference Monitoring ---
 class ActivationMonitor:
@@ -171,23 +177,36 @@ class MetricComputer:
         return a1 - np.where(np.isinf(a2), -1e6, a2)
 
     @staticmethod
-    def mechanistic_score(acts: Optional[np.ndarray]) -> float:
-        if acts is None or _ENTROPY_INDICES is None or not _ENTROPY_INDICES.size: return 0.0
+    def mechanistic_score(acts: Optional[np.ndarray]) -> List[float]:
+        # CHANGED: Returns List[float] (per token) instead of float (mean)
+        if acts is None or _ENTROPY_INDICES is None or not _ENTROPY_INDICES.size: return []
         try:
             valid = _ENTROPY_INDICES[_ENTROPY_INDICES < acts.shape[-1]]
-            if not valid.size: return 0.0
-            return float(np.mean(np.tanh(np.mean(acts[..., valid], axis=-1) * 0.5)))
-        except Exception: return 0.0
+            if not valid.size: return []
+            # CHANGED: Removed outer np.mean()
+            return np.tanh(np.mean(acts[..., valid], axis=-1) * 0.5).tolist()
+        except Exception: return []
 
     @classmethod
     def compute_vector(cls, trace: Trace) -> UncertaintyVector:
         gap = cls.logit_gap(trace.top1_logprobs, trace.top2_logprobs)
+        # CHANGED: Capture trace list
+        mech_raw = cls.mechanistic_score(trace.activations)
+        
         return UncertaintyVector(
             avg_entropy=float(np.mean(trace.entropies)) if trace.entropies else 0.0,
             min_logit_gap=float(np.min(gap)) if gap.size else 0.0,
             # Disable embeddings for fast generation
             heuristic_score=cls.calculate_heuristic_score(trace.text, use_embeddings=True), 
-            mechanistic_score=cls.mechanistic_score(trace.activations)
+            # CHANGED: Explicit mean for scalar score
+            mechanistic_score=float(np.mean(mech_raw)) if mech_raw else 0.0,
+            
+            # --- POPULATE TRACES ---
+            mech_trace=mech_raw,
+            entropy_trace=trace.entropies,
+            logit_gap_trace=gap.tolist(),
+            num_tokens=len(trace.tokens),
+            tokens=trace.tokens,
         )
 
 # --- 6. Offline Analysis (Batch & Grading) ---
