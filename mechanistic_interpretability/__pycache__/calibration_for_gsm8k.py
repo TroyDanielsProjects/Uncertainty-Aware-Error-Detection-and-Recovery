@@ -68,7 +68,7 @@ class GSM8KEvaluator:
         except ValueError:
             return False
 
-    def evaluate(self, num_samples: int = None, output_file: str = "gsm8k_analysis_results.csv"):
+    def evaluate(self, num_samples: int = None, output_file: str = "gsm8k_analysis_results.csv", skip = 0):
         """
         Runs the evaluation loop on GSM8K.
         """
@@ -78,7 +78,7 @@ class GSM8KEvaluator:
 
         # Limit samples
         if num_samples is not None:
-            dataset = list(dataset)[:num_samples]
+            dataset = list(dataset)[skip:num_samples + skip]
         
         all_records = []
 
@@ -189,6 +189,6 @@ if __name__ == "__main__":
     
     # Run a quick test
     try:
-        evaluator.evaluate(num_samples=500)
+        evaluator.evaluate(num_samples=500, output_file='gsm8k_analysis_test_results2.csv', skip=1000)
     except Exception as e:
         print(f"Test run skipped or failed (expected if datasets not installed): {e}")

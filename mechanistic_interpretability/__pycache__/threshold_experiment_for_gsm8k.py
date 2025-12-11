@@ -3,7 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import os
 
-def run_threshold_experiment(df, target_neurons=None, train_frac=0.8, output_folder='threshold_experiment_results'):
+def run_threshold_experiment(df, df_test = None, target_neurons=None, train_frac=0.8, output_folder='threshold_experiment_results'):
     """
     Runs an 'Error Detection' experiment using the 'Green Whisker' method.
     
@@ -50,9 +50,10 @@ def run_threshold_experiment(df, target_neurons=None, train_frac=0.8, output_fol
     np.random.seed(42) # For reproducibility
     np.random.shuffle(unique_problems)
     
-    split_idx = int(len(unique_problems) * train_frac)
-    train_problems = set(unique_problems[:split_idx])
-    test_problems = set(unique_problems[split_idx:])
+    if df_test is None:
+        split_idx = int(len(unique_problems) * train_frac)
+        train_problems = set(unique_problems[:split_idx])
+        test_problems = set(unique_problems[split_idx:])
     
     log_file_path = os.path.join(output_folder, 'threshold_experiment_log.txt')
     
@@ -65,8 +66,19 @@ def run_threshold_experiment(df, target_neurons=None, train_frac=0.8, output_fol
             }).reset_index()
             
             # Split into Train/Test
-            train_df = problem_stats[problem_stats['problem_id'].isin(train_problems)].copy()
-            test_df = problem_stats[problem_stats['problem_id'].isin(test_problems)].copy()
+            if df_test is None:
+                train_df = problem_stats[problem_stats['problem_id'].isin(train_problems)].copy()
+                test_df = problem_stats[problem_stats['problem_id'].isin(test_problems)].copy()
+            else:
+                # Take the whole thing.
+                train_df = problem_stats.copy()
+                
+                # Aggregate stats for the provided test set
+                test_df = df_test.groupby('problem_id').agg({
+                    neuron: 'max',
+                    'is_correct': 'first'
+                }).reset_index()
+                # Note: No need to filter test_df using problem_stats IDs either.
             
             # --- TRAIN: Calculate Threshold ---
             # Filter for Correct examples only
@@ -114,32 +126,32 @@ def run_threshold_experiment(df, target_neurons=None, train_frac=0.8, output_fol
             
             # Log results
             log = f"""
-{'='*40}
-Neuron: {neuron}
-{'='*40}
-Threshold (Upper Whisker of Correct Train Data): {threshold:.4f}
-(Train Stats: Q1={Q1:.4f}, Q3={Q3:.4f}, IQR={IQR:.4f})
+                    {'='*40}
+                    Neuron: {neuron}
+                    {'='*40}
+                    Threshold (Upper Whisker of Correct Train Data): {threshold:.4f}
+                    (Train Stats: Q1={Q1:.4f}, Q3={Q3:.4f}, IQR={IQR:.4f})
 
-Test Set Flagging Performance:
-------------------------------
-Total Test Samples:      {total_test}
-Total Actual Failures:   {total_actual_failures}
+                    Test Set Flagging Performance:
+                    ------------------------------
+                    Total Test Samples:      {total_test}
+                    Total Actual Failures:   {total_actual_failures}
 
-[FLAGGED GROUP] (Activation > Threshold):
-Total Flagged:           {total_flagged} ({total_flagged/total_test:.1%} of test set)
-  - Successfully Caught: {flagged_incorrect_count} (Actually Incorrect)
-  - False Alarms:        {flagged_correct_count} (Actually Correct)
-  
-Precision (Success / Total Flagged): {precision:.2%}
-"When this neuron yells, it is right {precision:.1%} of the time."
+                    [FLAGGED GROUP] (Activation > Threshold):
+                    Total Flagged:           {total_flagged} ({total_flagged/total_test:.1%} of test set)
+                    - Successfully Caught: {flagged_incorrect_count} (Actually Incorrect)
+                    - False Alarms:        {flagged_correct_count} (Actually Correct)
+                    
+                    Precision (Success / Total Flagged): {precision:.2%}
+                    "When this neuron yells, it is right {precision:.1%} of the time."
 
-[RECALL / COVERAGE]:
-Total Failures Caught:   {flagged_incorrect_count} / {total_actual_failures}
-Recall:                  {recall:.2%}
-"This neuron catches {recall:.1%} of all failures."
+                    [RECALL / COVERAGE]:
+                    Total Failures Caught:   {flagged_incorrect_count} / {total_actual_failures}
+                    Recall:                  {recall:.2%}
+                    "This neuron catches {recall:.1%} of all failures."
 
-(Missed {missed_failures} failures in the un-flagged group)
-"""
+                    (Missed {missed_failures} failures in the un-flagged group)
+                """
             print(log)
             f.write(log)
             
@@ -166,7 +178,8 @@ if __name__ == "__main__":
     # Including multiple neurons to show the loop functionalit
     
     df = pd.read_csv("./gsm8k_analysis_results.csv")
+    df_test = pd.read_csv("./gsm8k_analysis_test_results.csv")
     
     # Run the NEW Threshold Experiment
     target_neurons = ['Neuron_1674']
-    run_threshold_experiment(df, train_frac=0.8)
+    run_threshold_experiment(df, df_test=df_test, train_frac=0.8)
