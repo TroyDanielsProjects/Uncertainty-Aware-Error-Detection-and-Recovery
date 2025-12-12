@@ -14,44 +14,6 @@ from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
-# --- PREDICTOR ARTIFACT CLASS (New) ---
-
-class PredictorArtifact:
-    """Standardized function-like object for predictions."""
-    def __init__(self, model, scaler, features, mode='classifier', label_map=None):
-        self.model = model
-        self.scaler = scaler
-        self.features = features
-        self.mode = mode
-        self.label_map = label_map or {}
-
-    def __call__(self, df_input):
-        """
-        Input: DataFrame containing necessary feature columns (or dict).
-        Output: (probabilities_array, labels_list)
-        """
-        if isinstance(df_input, dict): df_input = pd.DataFrame([df_input])
-        
-        # Select and Scale
-        X = df_input[self.features].fillna(0)
-        if self.scaler: X = self.scaler.transform(X)
-
-        if self.mode == 'clustering':
-            preds = self.model.predict(X)
-            # Transform distance to "confidence" (simple heuristic) or return 1.0
-            dists = self.model.transform(X)
-            probs = 1.0 / (1.0 + dists.min(axis=1)) 
-            # Map cluster ID to rich text label
-            labels = [self.label_map.get(p, f"Cluster {p}") for p in preds]
-            return probs, labels
-        
-        else: # Classifier
-            if hasattr(self.model, "predict_proba"):
-                probs = self.model.predict_proba(X)[:, 1]
-            else:
-                probs = np.zeros(len(X))
-            return probs, [""] * len(X) # Label empty for standard classifiers
-
 # --- HELPER FUNCTIONS (Internal) ---
 
 def _generate_token_html(tokens, values, metric_name):
@@ -123,12 +85,10 @@ def run_full_analysis(df, metrics):
     """Iterates through metrics and generates report cards + plots."""
     if df is None or len(df) < 5:
         print("⚠️ Not enough data to run analysis.")
-        return {}
+        return
 
     sns.set_theme(style="white", context="paper")
     warnings.filterwarnings('ignore')
-
-    predictors = {}
 
     for m_exam in metrics:
         # 1. Stats
@@ -138,14 +98,6 @@ def run_full_analysis(df, metrics):
             acc_single = accuracy_score(df['is_correct'], clf_single.predict(df[[f'{m_exam}_Z']]))
             probs = clf_single.predict_proba(df[[f'{m_exam}_Z']])[:, 1]
             auroc_single = roc_auc_score(df['is_correct'], probs)
-
-            # Store Predictor
-            predictors[m_exam] = PredictorArtifact(
-                model=clf_single, 
-                scaler=None, 
-                features=[f'{m_exam}_Z'], 
-                mode='classifier'
-            )
         except:
             auroc_single, acc_single = 0.5, 0.0
 
@@ -215,8 +167,6 @@ def run_full_analysis(df, metrics):
         html_ex += "</div></div>"
         
         display(HTML(html_ex))
-    
-    return predictors
 
 
 
@@ -464,7 +414,6 @@ def run_failure_modes_dashboard(df, exp_info, features=['Entropy', 'LogitGap', '
     unique_clusters = sorted(df['Cluster'].unique())
     palette_colors = sns.color_palette("turbo", n_colors=len(unique_clusters))
     cluster_cmap = dict(zip(unique_clusters, palette_colors))
-    cluster_labels_map = {}
 
     plt.figure(figsize=(14, 10))
     sns.scatterplot(data=df[df['Correct']==1], x='x', y='y', color='#ecf0f1', s=60, alpha=0.3, linewidth=0, zorder=0)
@@ -480,7 +429,6 @@ def run_failure_modes_dashboard(df, exp_info, features=['Entropy', 'LogitGap', '
             
         cx, cy = target['x'].median(), target['y'].median()
         label_text = f"C{c}\n" + generate_label(sub, features, global_means, global_sds)
-        cluster_labels_map[c] = label_text
         
         plt.text(cx, cy, label_text, horizontalalignment='center', verticalalignment='center',
                  fontsize=9, fontweight='bold', color='black',
@@ -490,14 +438,6 @@ def run_failure_modes_dashboard(df, exp_info, features=['Entropy', 'LogitGap', '
     plt.axis('off')
     plt.tight_layout()
     plt.show()
-
-    return PredictorArtifact(
-        model=kmeans,
-        scaler=StandardScaler().fit(df[features].fillna(0)),
-        features=features,
-        mode='clustering',
-        label_map=cluster_labels_map
-    )
 
 # --- 3. METRIC DIAGNOSTICS & FEATURE SEARCH ---
 
@@ -595,317 +535,80 @@ def run_detailed_logistic_regression(df, features=['Entropy', 'LogitGap', 'Heuri
     ax2.legend()
     plt.show()
 
-    return PredictorArtifact(
-        model=clf,
-        scaler=scaler,
-        features=features,
-        mode='classifier'
-    )
-
-
-
-
-
-# ==============================================================================
-#  ADD THIS FUNCTION TO THE BOTTOM OF YOUR CODE
-# ==============================================================================
-
-def run_comparison_dashboard(df, classifier_artifact, cluster_predictor, metrics_to_use):
-    """
-    Generates a comprehensive HTML dashboard comparing Logistic Regression, 
-    Clustering Baselines, and Individual Metrics.
-    """
-    import matplotlib.pyplot as plt
-    import seaborn as sns
-    from sklearn.metrics import roc_auc_score, brier_score_loss
-    from IPython.display import display, HTML
-    import numpy as np
-    import pandas as pd
+def run_random_forest_diagnostics(df, features=['Entropy', 'LogitGap', 'Heuristic', 'Mechanistic', 'Length']):
+    """Random Forest analysis to catch non-linear patterns and hallucinations."""
+    display(Markdown("### Random Forest Diagnostics"))
     
-    # --- 1. CONFIGURATION & HELPERS ---
+    train_q, test_q = train_test_split(df['question_text'].unique(), test_size=0.2, random_state=42)
+    train_df, test_df = df[df['question_text'].isin(train_q)].fillna(0), df[df['question_text'].isin(test_q)].fillna(0)
     
-    MODEL_ORDER = ['Logistic Fusion', 'Cluster Baseline'] + metrics_to_use
-
-    def normalize_to_confidence(series, metric_name):
-        """Transforms raw metric into a 0-1 Confidence Probability proxy."""
-        s = series.fillna(series.mean())
-        # Inverse metrics: High Entropy = Low Confidence
-        is_inverse = metric_name in ['Entropy', 'LogitGap', 'Length', 'Semantic']
-        
-        if s.max() == s.min(): 
-            return np.zeros_like(s) + 0.5
-            
-        norm_val = (s - s.min()) / (s.max() - s.min())
-        final = (1 - norm_val) if is_inverse else norm_val
-        return np.clip(final, 0.0, 1.0)
-
-    def compute_ece(probs, y_true, n_bins=10):
-        """Expected Calibration Error."""
-        bin_boundaries = np.linspace(0, 1, n_bins + 1)
-        ece = 0.0
-        for i in range(n_bins):
-            mask = (probs > bin_boundaries[i]) & (probs <= bin_boundaries[i+1])
-            if not np.any(mask): continue
-            bin_prob = np.mean(probs[mask])
-            bin_acc = np.mean(y_true[mask])
-            ece += np.abs(bin_prob - bin_acc) * (np.sum(mask) / len(probs))
-        return ece
-
-    # --- 2. PREPARE PREDICTIONS ---
+    scaler = StandardScaler()
+    X_train = scaler.fit_transform(train_df[features])
+    X_test = scaler.transform(test_df[features])
     
-    try:
-        probs_fusion, _ = classifier_artifact(df)
-        df['Logistic Fusion'] = probs_fusion
-    except Exception as e:
-        print(f"⚠️ Could not generate Logistic Fusion predictions: {e}")
-        df['Logistic Fusion'] = 0.5
-
-    try:
-        _, labels = cluster_predictor(df)
-        df['Cluster_Label'] = labels
-        cluster_accs = df.groupby('Cluster_Label')['Correct'].mean()
-        df['Cluster Baseline'] = df['Cluster_Label'].map(cluster_accs)
-    except Exception as e:
-        print(f"⚠️ Could not generate Cluster predictions: {e}")
-        df['Cluster_Label'] = "Unknown"
-        df['Cluster Baseline'] = 0.5
-
-    for m in metrics_to_use:
-        if m in df.columns:
-            df[m] = normalize_to_confidence(df[m], m)
-
-    # --- 3. GLOBAL DATASET PERFORMANCE ---
+    # Grid Search for robustness
+    param_grid = {'n_estimators': [50, 100], 'max_depth': [3, 5], 'class_weight': ['balanced']}
+    clf = GridSearchCV(RandomForestClassifier(random_state=42), param_grid, cv=3, scoring='roc_auc').fit(X_train, train_df['Correct'])
+    best_clf = clf.best_estimator_
     
-    global_stats = []
-    valid_models = [m for m in MODEL_ORDER if m in df.columns]
+    probs = best_clf.predict_proba(X_test)[:, 1]
+    test_df['Prob_Correct'] = probs
     
-    for model in valid_models:
-        probs = df[model]
-        try:
-            auroc = roc_auc_score(df['Correct'], probs)
-            ece = compute_ece(probs.values, df['Correct'].values)
-            brier = brier_score_loss(df['Correct'], probs)
-            
-            global_stats.append({
-                'Model': model,
-                'AUROC (↑)': auroc,
-                'ECE (↓)': ece,
-                'MSE (↓)': brier
-            })
-        except ValueError:
-            continue
-
-    if global_stats:
-        g_df = pd.DataFrame(global_stats).set_index('Model')
-        best_mse = g_df['MSE (↓)'].min()
-        g_df['Status'] = g_df['MSE (↓)'].apply(lambda x: '🏆 Winner' if x == best_mse else '')
-
-        display(HTML("<h2>🌍 Overall Dataset Performance</h2>"))
-        display(HTML(g_df.style.background_gradient(cmap='Greens', subset=['AUROC (↑)'])
-                     .background_gradient(cmap='Reds', subset=['ECE (↓)', 'MSE (↓)'])
-                     .format("{:.4f}", subset=['AUROC (↑)', 'ECE (↓)', 'MSE (↓)'])
-                     .to_html()))
-    else:
-        print("⚠️ No valid models to evaluate.")
-
-    # --- 4. CLUSTER DEEP DIVE ---
-
-    CSS = """
-    <style>
-        .cl-card { font-family:'Segoe UI', sans-serif; border:1px solid #ddd; border-radius:8px; margin-bottom:25px; box-shadow:0 3px 6px rgba(0,0,0,0.05); overflow:hidden; background:white; }
-        .cl-head { padding:10px 15px; border-bottom:1px solid #eee; display:flex; justify-content:space-between; align-items:center; background:#f8f9fa; }
-        /* CHANGED: 5-Column Grid to fit AUROC */
-        .cl-grid { display:grid; grid-template-columns: 15% 20% 25% 20% 20%; }
-        .cl-col { padding:12px; border-right:1px solid #eee; font-size:0.85em; }
-        .cl-col:last-child { border-right:none; background:#fafafa; }
-        .bar-row { display:flex; align-items:center; margin-bottom:5px; }
-        .bar-label { width:80px; color:#555; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:0.9em; }
-        .bar-track { flex:1; height:14px; background:#e0e0e0; border-radius:3px; overflow:hidden; margin-right:8px; }
-        .bar-val { height:100%; display:flex; align-items:center; padding-left:4px; font-size:0.7em; color:white; font-weight:bold; }
-        .sanity-tbl { width:100%; border-collapse:collapse; font-size:0.85em; }
-        .sanity-tbl td { padding:2px 4px; border-bottom:1px solid #eee; color:#444; text-align:right; }
-        .sanity-tbl td:first-child { text-align:left; font-weight:500; }
-        .sanity-tbl th { text-align:right; padding:2px 4px; border-bottom:2px solid #ddd; color:#777; font-weight:600; font-size:0.8em; }
-        .sanity-tbl th:first-child { text-align:left; }
-    </style>
-    """
-
-    html_out = [CSS, "<h2>🔍 Deep Dive: Per-Cluster Model Validation</h2>"]
-
-    if 'Cluster_Label' in df.columns:
-        unique_clusters = df['Cluster_Label'].value_counts().index
-        
-        for label in unique_clusters:
-            sub = df[df['Cluster_Label'] == label]
-            n = len(sub)
-            if n < 5: continue # Need slightly more data for valid AUROC
-            
-            # Confidence Interval
-            acc = sub['Correct'].mean()
-            ci = 1.96 * (sub['Correct'].std() / np.sqrt(n))
-            acc_color = "#27ae60" if acc > 0.7 else ("#e67e22" if acc > 0.4 else "#c0392b")
-
-            # --- COL 1: PROFILE ---
-            profile_html = "<div style='color:#777; font-weight:bold; margin-bottom:5px'>Cluster Profile</div>"
-            for m in metrics_to_use:
-                if m not in df.columns or df[m].std() == 0: continue
-                z = (sub[m].mean() - df[m].mean()) / df[m].std()
-                if abs(z) < 0.25: continue
-                arrow = "⬆" if z > 0 else "⬇"
-                color = "#c0392b" if z > 0 else "#2980b9"
-                profile_html += f"<div style='border-bottom:1px dashed #eee; padding:2px 0;'><b>{m}</b>: <span style='color:{color}'>{arrow} {abs(z):.1f}σ</span></div>"
-
-            # --- COL 2: AVG CONFIDENCE ---
-            preds_html = "<div style='color:#777; font-weight:bold; margin-bottom:5px'>Avg Confidence</div>"
-            preds_html += f"<div class='bar-row'><div class='bar-label' style='font-weight:bold'>ACTUAL</div><div class='bar-track'><div class='bar-val' style='width:{acc*100}%; background:{acc_color}'>{acc:.1%}</div></div></div><hr style='margin:4px 0; border:0; border-top:1px solid #eee'>"
-            for model in valid_models:
-                conf = sub[model].mean()
-                bg = "#2c3e50" if model == 'Logistic Fusion' else ("#7f8c8d" if model == 'Cluster Baseline' else "#95a5a6")
-                if abs(conf - acc) > 0.2 and model != 'Logistic Fusion': bg = "#e74c3c"
-                preds_html += f"<div class='bar-row'><div class='bar-label'>{model}</div><div class='bar-track'><div class='bar-val' style='width:{conf*100}%; background:{bg}'>{conf:.0%}</div></div></div>"
-
-            # --- COL 3: MSE SHOOTOUT ---
-            shootout_html = "<div style='color:#777; font-weight:bold; margin-bottom:5px'>MSE (Lower is Better)</div>"
-            cluster_errors = {m: brier_score_loss(sub['Correct'], sub[m]) for m in valid_models}
-            if cluster_errors:
-                min_err = min(cluster_errors.values())
-                max_err = max(cluster_errors.values()) + 0.001
-                for model in valid_models:
-                    mse = cluster_errors[model]
-                    width = (mse / max_err) * 100
-                    is_winner = (mse == min_err)
-                    star = "🏆 " if is_winner else ""
-                    weight = "bold" if is_winner else "normal"
-                    color = "#27ae60" if is_winner else "#95a5a6"
-                    if model == 'Logistic Fusion': color = "#2c3e50"
-                    shootout_html += f"<div style='display:flex; align-items:center; margin-bottom:4px; font-weight:{weight}; font-size:0.8em'><div style='width:80px; overflow:hidden; white-space:nowrap; text-overflow:ellipsis'>{star}{model}</div><div style='flex:1; height:8px; background:#eee; margin:0 5px; border-radius:2px'><div style='width:{width}%; background:{color}; height:100%'></div></div><div style='width:35px; text-align:right; font-family:monospace'>{mse:.3f}</div></div>"
-
-            # --- COL 4: AUROC (NEW SECTION) ---
-            auroc_html = "<div style='color:#777; font-weight:bold; margin-bottom:5px'>AUROC (Higher is Better)</div>"
-            # Check if we can calculate AUC (need both 0 and 1 class)
-            if len(sub['Correct'].unique()) > 1:
-                cluster_aucs = {}
-                for model in valid_models:
-                    try: cluster_aucs[model] = roc_auc_score(sub['Correct'], sub[model])
-                    except: cluster_aucs[model] = 0.5
-                
-                max_auc = max(cluster_aucs.values())
-                for model in valid_models:
-                    auc = cluster_aucs.get(model, 0.5)
-                    # Normalize bar width: 0.5 to 1.0 range maps to 0-100% width
-                    width = max(0, (auc - 0.5) * 200) 
-                    is_best = (auc == max_auc) and (auc > 0.5)
-                    weight = "bold" if is_best else "normal"
-                    color = "#8e44ad" if is_best else "#bdc3c7" # Purple for best AUC
-                    
-                    auroc_html += f"<div style='display:flex; align-items:center; margin-bottom:4px; font-weight:{weight}; font-size:0.8em'><div style='width:80px; overflow:hidden; white-space:nowrap; text-overflow:ellipsis'>{model}</div><div style='flex:1; height:8px; background:#eee; margin:0 5px; border-radius:2px'><div style='width:{width}%; background:{color}; height:100%'></div></div><div style='width:35px; text-align:right; font-family:monospace'>{auc:.2f}</div></div>"
-            else:
-                auroc_html += "<div style='font-style:italic; color:#999; font-size:0.85em'>No variance in class labels (Acc 0% or 100%).<br>AUROC undefined.</div>"
-
-            # --- COL 5: SANITY ---
-            sanity_html = "<div style='color:#777; font-weight:bold; margin-bottom:5px'>Stats</div>"
-            sanity_html += "<table class='sanity-tbl'><thead><tr><th>Model</th><th>Mn</th><th>Rg</th></tr></thead><tbody>"
-            for model in valid_models:
-                vals = sub[model]
-                mn, rng = vals.mean(), vals.max() - vals.min()
-                sanity_html += f"<tr><td>{model}</td><td>{mn:.2f}</td><td>{rng:.2f}</td></tr>"
-            sanity_html += "</tbody></table>"
-
-            # --- ASSEMBLE ---
-            card = f"""
-            <div class="cl-card">
-                <div class="cl-head" style="border-left:5px solid {acc_color}">
-                    <div style="font-weight:bold; font-size:1.1em">{label.splitlines()[0]}</div>
-                    <div>n={n} | Acc: {acc:.1%} ±{ci:.1%}</div>
-                </div>
-                <div class="cl-grid">
-                    <div class="cl-col">{profile_html}</div>
-                    <div class="cl-col">{preds_html}</div>
-                    <div class="cl-col">{shootout_html}</div>
-                    <div class="cl-col">{auroc_html}</div>
-                    <div class="cl-col">{sanity_html}</div>
-                </div>
-            </div>
-            """
-            html_out.append(card)
-
-    display(HTML("".join(html_out)))
-
-
-
-
-def plot_auarc_analysis(df, metrics_to_use):
-    """
-    Plots AUARC with automatic directionality correction and predictor inclusion.
-    """
-    import matplotlib.pyplot as plt
-    import numpy as np
-    from sklearn.metrics import auc
+    # Plots
+    plt.figure(figsize=(12, 4))
+    plt.subplot(1, 2, 1)
+    sns.kdeplot(x=test_df[test_df['Correct']==1]['Prob_Correct'], fill=True, color='green', label='Actual Correct', alpha=0.3)
+    sns.kdeplot(x=test_df[test_df['Correct']==0]['Prob_Correct'], fill=True, color='red', label='Actual Incorrect', alpha=0.3)
+    plt.title('Prediction Confidence Density')
+    plt.legend()
     
-    # 1. Define Inverse Metrics (Lower Value = Higher Confidence)
-    #    Add any other metrics here that behave like "Error" or "Uncertainty"
-    inverse_metrics = ['Entropy', 'LogitGap', 'Length', 'Semantic', 'Heuristic', 'Mechanistic']
-    
-    # 2. Add your ML Predictors to the list if they exist in DF
-    predictors = metrics_to_use.copy()
-    if 'Logistic Fusion' in df.columns: predictors.insert(0, 'Logistic Fusion')
-    if 'Cluster Baseline' in df.columns: predictors.insert(1, 'Cluster Baseline')
-    
-    plt.figure(figsize=(10, 6))
-    
-    # Plot Baseline
-    base_acc = df['Correct'].mean()
-    plt.axhline(base_acc, color='black', linestyle='--', alpha=0.5, label=f'Baseline Acc ({base_acc:.1%})')
-    
-    for model in predictors:
-        if model not in df.columns: continue
-        
-        # 3. Handle Directionality (The Fix)
-        # If it's an inverse metric, we negate it so sorting Ascending works correctly
-        raw_vals = df[model].fillna(df[model].mean())
-        
-        if model in inverse_metrics:
-            # Low Entropy = High Confidence -> Sort Smallest to Largest
-            # We achieve this by sorting by NEGATIVE value Descending
-            confidence_scores = -1 * raw_vals
-        else:
-            # High Consistency = High Confidence -> Sort Largest to Smallest
-            confidence_scores = raw_vals
-            
-        # 4. Sort Data by Confidence (High -> Low)
-        sorted_df = pd.DataFrame({'y': df['Correct'], 'conf': confidence_scores})
-        sorted_df = sorted_df.sort_values('conf', ascending=False)
-        
-        y_sorted = sorted_df['y'].values
-        n = len(y_sorted)
-        
-        # 5. Calculate Curve
-        rejection_rates = np.linspace(0, 0.90, 50) # Stop at 90%
-        accuracies = []
-        
-        for r in rejection_rates:
-            n_keep = int(n * (1 - r))
-            if n_keep < 5: break 
-            acc = np.mean(y_sorted[:n_keep])
-            accuracies.append(acc)
-            
-        # 6. Plot
-        valid_rr = rejection_rates[:len(accuracies)]
-        score = auc(valid_rr, accuracies)
-        
-        # Highlight ML models with thicker lines
-        lw = 3 if 'Logistic' in model or 'Cluster' in model else 1.5
-        ls = '-'
-        
-        plt.plot(valid_rr, accuracies, lw=lw, linestyle=ls, label=f'{model} (AUARC: {score:.3f})')
-
-    plt.xlabel('Rejection Rate (Fraction Refused)')
-    plt.ylabel('Accuracy of Remaining Answers')
-    plt.title('Accuracy-Rejection Curve (Corrected Directionality)')
-    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-    plt.grid(True, alpha=0.3)
+    plt.subplot(1, 2, 2)
+    pd.Series(best_clf.feature_importances_, index=features).sort_values().plot(kind='barh', color='#34495e')
+    plt.title('Feature Importance (RF)')
     plt.tight_layout()
-    plt.show();
+    plt.show()
 
-# --- RUN IT ---
-# plot_auarc_analysis(df, metrics_to_use)
+# --- 5. TRACE SPIKE ANALYSIS ---
+
+def analyze_trace_spikes(db_path, result_id=None, threshold=0.05):
+    """Visualizes token-level spikes in mechanistic scores."""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    
+    query = "SELECT * FROM Results WHERE result_id = ?" if result_id else "SELECT * FROM Results ORDER BY result_id DESC LIMIT 1"
+    params = (result_id,) if result_id else ()
+    row = conn.execute(query, params).fetchone()
+    conn.close()
+    
+    if not row: return print("No data found.")
+    
+    try:
+        mech_trace = json.loads(row['uq_mech_trace'])
+        tokens = json.loads(row['uq_tokens'])
+    except: return print("Trace data missing.")
+
+    deltas = [0] + [mech_trace[i] - mech_trace[i-1] for i in range(1, len(mech_trace))]
+    
+    plt.figure(figsize=(12, 6))
+    plt.subplot(2, 1, 1)
+    plt.plot(mech_trace, label='Mechanistic Score', color='#2c3e50')
+    plt.title(f"Trace Trajectory (ID: {row['result_id']})")
+    plt.grid(True, alpha=0.3)
+    
+    plt.subplot(2, 1, 2)
+    plt.bar(range(len(deltas)), deltas, color=['red' if d > 0 else 'blue' for d in deltas])
+    plt.axhline(y=threshold, color='r', linestyle='--')
+    plt.axhline(y=-threshold, color='b', linestyle='--')
+    plt.title("Token-wise Deltas")
+    plt.tight_layout()
+    plt.show()
+    
+    print(f"\n=== MAJOR SPIKES (> {threshold}) ===")
+    print(f"{'Pos':<5} | {'Delta':<8} | {'Score':<8} | {'Token'}")
+    print("-" * 45)
+    limit = min(len(tokens), len(deltas))
+    for i in range(limit):
+        if abs(deltas[i]) >= threshold:
+            ind = "🔺" if deltas[i] > 0 else "🔻"
+            tok = str(tokens[i]).replace('Ġ', ' ').replace('Ċ', '\\n')
+            print(f"{i:<5} | {deltas[i]:+.4f} {ind} | {mech_trace[i]:.4f}   | \"{tok}\"")
