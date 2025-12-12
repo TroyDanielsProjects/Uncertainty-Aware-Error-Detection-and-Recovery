@@ -534,3 +534,81 @@ def run_detailed_logistic_regression(df, features=['Entropy', 'LogitGap', 'Heuri
     ax2.set_title("ROC Curve")
     ax2.legend()
     plt.show()
+
+def run_random_forest_diagnostics(df, features=['Entropy', 'LogitGap', 'Heuristic', 'Mechanistic', 'Length']):
+    """Random Forest analysis to catch non-linear patterns and hallucinations."""
+    display(Markdown("### Random Forest Diagnostics"))
+    
+    train_q, test_q = train_test_split(df['question_text'].unique(), test_size=0.2, random_state=42)
+    train_df, test_df = df[df['question_text'].isin(train_q)].fillna(0), df[df['question_text'].isin(test_q)].fillna(0)
+    
+    scaler = StandardScaler()
+    X_train = scaler.fit_transform(train_df[features])
+    X_test = scaler.transform(test_df[features])
+    
+    # Grid Search for robustness
+    param_grid = {'n_estimators': [50, 100], 'max_depth': [3, 5], 'class_weight': ['balanced']}
+    clf = GridSearchCV(RandomForestClassifier(random_state=42), param_grid, cv=3, scoring='roc_auc').fit(X_train, train_df['Correct'])
+    best_clf = clf.best_estimator_
+    
+    probs = best_clf.predict_proba(X_test)[:, 1]
+    test_df['Prob_Correct'] = probs
+    
+    # Plots
+    plt.figure(figsize=(12, 4))
+    plt.subplot(1, 2, 1)
+    sns.kdeplot(x=test_df[test_df['Correct']==1]['Prob_Correct'], fill=True, color='green', label='Actual Correct', alpha=0.3)
+    sns.kdeplot(x=test_df[test_df['Correct']==0]['Prob_Correct'], fill=True, color='red', label='Actual Incorrect', alpha=0.3)
+    plt.title('Prediction Confidence Density')
+    plt.legend()
+    
+    plt.subplot(1, 2, 2)
+    pd.Series(best_clf.feature_importances_, index=features).sort_values().plot(kind='barh', color='#34495e')
+    plt.title('Feature Importance (RF)')
+    plt.tight_layout()
+    plt.show()
+
+# --- 5. TRACE SPIKE ANALYSIS ---
+
+def analyze_trace_spikes(db_path, result_id=None, threshold=0.05):
+    """Visualizes token-level spikes in mechanistic scores."""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    
+    query = "SELECT * FROM Results WHERE result_id = ?" if result_id else "SELECT * FROM Results ORDER BY result_id DESC LIMIT 1"
+    params = (result_id,) if result_id else ()
+    row = conn.execute(query, params).fetchone()
+    conn.close()
+    
+    if not row: return print("No data found.")
+    
+    try:
+        mech_trace = json.loads(row['uq_mech_trace'])
+        tokens = json.loads(row['uq_tokens'])
+    except: return print("Trace data missing.")
+
+    deltas = [0] + [mech_trace[i] - mech_trace[i-1] for i in range(1, len(mech_trace))]
+    
+    plt.figure(figsize=(12, 6))
+    plt.subplot(2, 1, 1)
+    plt.plot(mech_trace, label='Mechanistic Score', color='#2c3e50')
+    plt.title(f"Trace Trajectory (ID: {row['result_id']})")
+    plt.grid(True, alpha=0.3)
+    
+    plt.subplot(2, 1, 2)
+    plt.bar(range(len(deltas)), deltas, color=['red' if d > 0 else 'blue' for d in deltas])
+    plt.axhline(y=threshold, color='r', linestyle='--')
+    plt.axhline(y=-threshold, color='b', linestyle='--')
+    plt.title("Token-wise Deltas")
+    plt.tight_layout()
+    plt.show()
+    
+    print(f"\n=== MAJOR SPIKES (> {threshold}) ===")
+    print(f"{'Pos':<5} | {'Delta':<8} | {'Score':<8} | {'Token'}")
+    print("-" * 45)
+    limit = min(len(tokens), len(deltas))
+    for i in range(limit):
+        if abs(deltas[i]) >= threshold:
+            ind = "🔺" if deltas[i] > 0 else "🔻"
+            tok = str(tokens[i]).replace('Ġ', ' ').replace('Ċ', '\\n')
+            print(f"{i:<5} | {deltas[i]:+.4f} {ind} | {mech_trace[i]:.4f}   | \"{tok}\"")
