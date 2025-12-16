@@ -412,7 +412,7 @@ def run_failure_modes_dashboard(df, exp_info, features=['Entropy', 'LogitGap', '
     # 1. Clustering
     X = StandardScaler().fit_transform(df[features].fillna(0))
     # Adaptive cluster count
-    n_clusters = min(12, len(df)//10) if len(df) > 50 else 3
+    n_clusters = min(3, len(df)//10) if len(df) > 50 else 3
     kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=5)
     df['Cluster'] = kmeans.fit_predict(X)
 
@@ -556,17 +556,23 @@ def run_feature_subset_search(df, features=['Entropy', 'LogitGap', 'Heuristic', 
 
 # --- 4. COMPREHENSIVE MODELING ---
 
-def run_detailed_logistic_regression(df, features=['Entropy', 'LogitGap', 'Heuristic', 'Mechanistic', 'Length']):
-    """Full Logistic Regression report with coefficients and visualizations."""
+def run_detailed_logistic_regression(df, features=['Entropy', 'LogitGap', 'Heuristic', 'Mechanistic', 'Consistency', 'Semantic', 'Length']):
+    """
+    Full Logistic Regression report with coefficients and visualizations.
+    UPDATED: Includes all 6 paper signals by default + Length. Fixed Seaborn warning.
+    """
     display(Markdown("### Full Logistic Regression Analysis"))
+    
+    # Filter only features present in DF
+    valid_features = [f for f in features if f in df.columns]
     
     train_q, test_q = train_test_split(df['question_text'].unique(), test_size=0.5, random_state=42)
     train_df = df[df['question_text'].isin(train_q)].copy().fillna(0)
     test_df  = df[df['question_text'].isin(test_q)].copy().fillna(0)
     
     scaler = StandardScaler()
-    X_train = scaler.fit_transform(train_df[features])
-    X_test  = scaler.transform(test_df[features])
+    X_train = scaler.fit_transform(train_df[valid_features])
+    X_test  = scaler.transform(test_df[valid_features])
     y_train, y_test = train_df['Correct'], test_df['Correct']
     
     clf = LogisticRegression(penalty="l2", class_weight="balanced", max_iter=1000, random_state=42)
@@ -574,9 +580,15 @@ def run_detailed_logistic_regression(df, features=['Entropy', 'LogitGap', 'Heuri
     probs = clf.predict_proba(X_test)[:, 1]
     
     # 1. Feature Importance
-    coef_df = pd.DataFrame({'Feature': features, 'Weight': clf.coef_[0], 'Odds Ratio': np.exp(clf.coef_[0])}).sort_values('Weight', ascending=False)
+    coef_df = pd.DataFrame({'Feature': valid_features, 'Weight': clf.coef_[0]}).sort_values('Weight', ascending=False)
     plt.figure(figsize=(10, 4))
-    sns.barplot(x='Weight', y='Feature', data=coef_df, palette=['forestgreen' if x>0 else 'crimson' for x in coef_df['Weight']])
+    
+    # FIX: Added hue='Feature' and legend=False to silence warning
+    sns.barplot(
+        x='Weight', y='Feature', data=coef_df, 
+        hue='Feature', legend=False,
+        palette=['forestgreen' if x > 0 else 'crimson' for x in coef_df['Weight']]
+    )
     plt.title("Feature Weights (Direction & Magnitude)")
     plt.axvline(0, color='black')
     plt.show()
@@ -598,11 +610,9 @@ def run_detailed_logistic_regression(df, features=['Entropy', 'LogitGap', 'Heuri
     return PredictorArtifact(
         model=clf,
         scaler=scaler,
-        features=features,
+        features=valid_features,
         mode='classifier'
     )
-
-
 
 
 
@@ -836,15 +846,16 @@ def run_comparison_dashboard(df, classifier_artifact, cluster_predictor, metrics
 
 def plot_auarc_analysis(df, metrics_to_use):
     """
-    Plots AUARC with automatic directionality correction and predictor inclusion.
+    Plots AUARC with automatic directionality correction.
+    UPDATED: LogitGap removed from inverse_metrics (High Gap = High Confidence).
     """
     import matplotlib.pyplot as plt
     import numpy as np
     from sklearn.metrics import auc
     
     # 1. Define Inverse Metrics (Lower Value = Higher Confidence)
-    #    Add any other metrics here that behave like "Error" or "Uncertainty"
-    inverse_metrics = ['Entropy', 'LogitGap', 'Length', 'Semantic', 'Heuristic', 'Mechanistic']
+    #    NOTE: LogitGap is NOT here because High Gap = High Confidence
+    inverse_metrics = ['Entropy', 'Length', 'Semantic', 'Heuristic', 'Mechanistic']
     
     # 2. Add your ML Predictors to the list if they exist in DF
     predictors = metrics_to_use.copy()
@@ -860,16 +871,14 @@ def plot_auarc_analysis(df, metrics_to_use):
     for model in predictors:
         if model not in df.columns: continue
         
-        # 3. Handle Directionality (The Fix)
-        # If it's an inverse metric, we negate it so sorting Ascending works correctly
+        # 3. Handle Directionality
         raw_vals = df[model].fillna(df[model].mean())
         
         if model in inverse_metrics:
-            # Low Entropy = High Confidence -> Sort Smallest to Largest
-            # We achieve this by sorting by NEGATIVE value Descending
+            # High Entropy/Heuristic = Low Confidence -> Negate to sort correctly
             confidence_scores = -1 * raw_vals
         else:
-            # High Consistency = High Confidence -> Sort Largest to Smallest
+            # High Consistency/LogitGap = High Confidence -> Keep as is
             confidence_scores = raw_vals
             
         # 4. Sort Data by Confidence (High -> Low)
@@ -880,7 +889,7 @@ def plot_auarc_analysis(df, metrics_to_use):
         n = len(y_sorted)
         
         # 5. Calculate Curve
-        rejection_rates = np.linspace(0, 0.90, 50) # Stop at 90%
+        rejection_rates = np.linspace(0, 0.90, 50) # Stop at 90% rejection
         accuracies = []
         
         for r in rejection_rates:
@@ -893,11 +902,19 @@ def plot_auarc_analysis(df, metrics_to_use):
         valid_rr = rejection_rates[:len(accuracies)]
         score = auc(valid_rr, accuracies)
         
-        # Highlight ML models with thicker lines
         lw = 3 if 'Logistic' in model or 'Cluster' in model else 1.5
         ls = '-'
         
         plt.plot(valid_rr, accuracies, lw=lw, linestyle=ls, label=f'{model} (AUARC: {score:.3f})')
+
+    plt.xlabel('Rejection Rate (Fraction Refused)')
+    plt.ylabel('Accuracy of Remaining Answers')
+    plt.title('Accuracy-Rejection Curve')
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+    plt.plot(valid_rr, accuracies, lw=lw, linestyle=ls, label=f'{model} (AUARC: {score:.3f})')
 
     plt.xlabel('Rejection Rate (Fraction Refused)')
     plt.ylabel('Accuracy of Remaining Answers')

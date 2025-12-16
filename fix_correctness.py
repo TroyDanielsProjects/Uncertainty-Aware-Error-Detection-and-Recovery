@@ -8,69 +8,117 @@ from llama_cpp import Llama
 # --------------------
 DB_PATH = "db/results.sqlite"
 MODEL_PATH = "models/mistral-7b-instruct.Q4_K_M.gguf"
-BATCH_SIZE = 16
+BATCH_SIZE = 4
 CTX = 4096
 
 # --------------------
 # Load model (Metal / MPS)
 # --------------------
+print(f"Loading model from {MODEL_PATH}...")
 llm = Llama(
     model_path=MODEL_PATH,
     n_ctx=CTX,
     n_threads=8,
-    n_gpu_layers=-1,   # 🔥 ALL layers on Metal
+    n_gpu_layers=-1, # Metal/MPS offloading
     verbose=False,
 )
 
 # --------------------
-# JSON Parsing (robust)
+# Robust JSON Parsing (Fixes Invalid \escape & Extra data)
 # --------------------
 def parse_json_safe(text: str):
-    match = re.search(r"\{.*\}", text, re.DOTALL)
+    """
+    Robustly parses JSON, handling:
+    1. 'Extra data': via Regex extraction.
+    2. 'Invalid \escape': via automatic backslash sanitization fallback.
+    """
+    # 1. Regex to find the JSON object (ignores text before/after)
+    match = re.search(r"(\{.*\})", text, re.DOTALL)
     if not match:
-        raise ValueError(f"No JSON found:\n{text}")
-    return json.loads(match.group())
+        return {}
+    
+    json_str = match.group(1)
 
+    # 2. Try standard parsing first
+    try:
+        return json.loads(json_str)
+    except json.JSONDecodeError:
+        # 3. Fallback: Fix LaTeX backslashes (e.g., "\boxed" -> "\\boxed")
+        try:
+            # Escape all backslashes to make them valid JSON text
+            fixed_str = json_str.replace("\\", "\\\\")
+            return json.loads(fixed_str)
+        except:
+            # If it still fails, return empty to prevent script crash
+            return {}
 
-# --------------------
-# Local LLM Grader
-# --------------------
-def local_grade(question, full_response):
-    prompt = f"""[INST]
-You are a strict math grader.
-
-Question:
-{question}
-
-Student's FULL response:
-{full_response}
-
-Task:
-Determine whether the student's final numerical answer is mathematically correct.
-
-Rules:
-- Ignore formatting, verbosity, markdown, repetition
-- Ignore explanation quality
-- Judge ONLY mathematical correctness
-- If the correct final number appears anywhere, mark correct
-
-Respond ONLY in JSON:
-{{
-  "correct": true or false,
-  "reason": "brief justification"
-}}
-[/INST]
-"""
-
+def run_llm_completion(prompt):
+    """Runs the LLM with low temperature for deterministic output."""
     out = llm(
         prompt,
-        max_tokens=256,
+        max_tokens=64,  # Keep it short
         temperature=0,
-        stop=["</s>"],
+        stop=["</s>", "```", "\n\n"]
     )
-
     return parse_json_safe(out["choices"][0]["text"])
 
+# --------------------
+# Two-Step Grader Logic (Extract -> Compare)
+# --------------------
+def step1_extract_value(full_trace):
+    """Step 1: Blind extraction of the student's answer."""
+    # Slice the last 2500 chars to ensure the final answer is in context
+    trace_snippet = full_trace[-2500:] 
+    
+    prompt = f"""[INST] 
+Extract the final answer from the text below.
+- Prioritize values in \\boxed{{...}}
+- Return strictly the number/string.
+
+Text:
+{trace_snippet} 
+
+Respond ONLY in JSON:
+{{ "val": "extracted_value" }}
+[/INST]""" 
+    
+    res = run_llm_completion(prompt)
+    return res.get("val", None)
+
+def step2_verify_match(gold_val, student_val):
+    """Step 2: Strict comparison without context noise."""
+    prompt = f"""[INST] 
+Are these two values mathematically equivalent?
+- Ignore formatting (e.g. 1000 = 1,000)
+- Ignore units (e.g. $5 = 5)
+
+A (Gold): "{gold_val}"
+B (Student): "{student_val}"
+
+Respond ONLY in JSON:
+{{ "match": true/false }}
+[/INST]"""
+    
+    res = run_llm_completion(prompt)
+    return res.get("match", False)
+
+def local_grade(question, gold_answer, full_trace):
+    # 1. Extract
+    extracted = step1_extract_value(full_trace)
+    
+    if extracted is None:
+        return {
+            "correct": False,
+            "reason": "Extraction Failed (No JSON returned)"
+        }
+
+    # 2. Compare
+    is_match = step2_verify_match(str(gold_answer), str(extracted))
+
+    return {
+        "correct": is_match,
+        "reason": f"Extracted: {extracted}"
+    }
 
 # --------------------
 # DB Setup
@@ -91,33 +139,34 @@ if "old_correct" not in cols:
 # Fetch rows
 # --------------------
 cur.execute("""
-    SELECT result_id, question_text, full_trace_text
+    SELECT result_id, question_text, full_trace_text, gold_answer
     FROM Results
 """)
 rows = cur.fetchall()
 
-print(f"Regrading {len(rows)} rows using local MPS LLM")
+print(f"Regrading {len(rows)} rows using Two-Step Local LLM")
 
 # --------------------
-# Regrade
+# Regrade Loop
 # --------------------
 for i in range(0, len(rows), BATCH_SIZE):
     batch = rows[i:i + BATCH_SIZE]
 
-    for result_id, question, full_trace in batch:
+    for result_id, question, full_trace, gold_answer in batch:
         try:
-            verdict = local_grade(question, full_trace)
+            # Run the two-step grader
+            verdict = local_grade(question, gold_answer, full_trace) 
 
             cur.execute("""
                 UPDATE Results
                 SET
                     is_correct = ?,
-                    eval_method = 'Local_MPS_LLM',
+                    eval_method = 'Local_MPS_CoT',
                     gpt_eval_reason = ?
                 WHERE result_id = ?
             """, (
                 int(verdict["correct"]),
-                verdict.get("reason", ""),
+                verdict["reason"],
                 result_id
             ))
 
@@ -126,7 +175,7 @@ for i in range(0, len(rows), BATCH_SIZE):
             cur.execute("""
                 UPDATE Results
                 SET
-                    eval_method = 'Local_MPS_LLM_ERROR',
+                    eval_method = 'Local_MPS_ERROR',
                     gpt_eval_reason = ?
                 WHERE result_id = ?
             """, (str(e), result_id))
@@ -135,4 +184,4 @@ for i in range(0, len(rows), BATCH_SIZE):
     print(f"Regraded {min(i + BATCH_SIZE, len(rows))}/{len(rows)}")
 
 conn.close()
-print("✅ Regrading complete using local MPS LLM")
+print("✅ Regrading complete using Two-Step Logic")
