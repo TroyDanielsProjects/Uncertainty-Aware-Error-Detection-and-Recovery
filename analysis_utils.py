@@ -454,7 +454,463 @@ def generate_label(sub_df, features, global_means, global_sds):
     return "\n".join(top_descs) if top_descs else "Average Stats"
     
 
+import matplotlib.pyplot as plt
+import seaborn as sns
+from IPython.display import display, HTML
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+from sklearn.manifold import TSNE
+import pandas as pd
+import numpy as np
+from itertools import combinations
+
+# --- HELPER 1: Filter Data by Observed Difficulty ---
+def get_difficulty_slice(df, k):
+    """
+    Returns a subset of df containing only questions that appear exactly 4 times
+    and were answered correctly exactly 'k' times.
+    """
+    if 'question_id_external' not in df.columns:
+        return pd.DataFrame()
+    
+    # Transform to keep dataframe shape while filtering
+    counts = df.groupby('question_id_external')['Correct'].transform('count')
+    successes = df.groupby('question_id_external')['Correct'].transform('sum')
+    
+    return df[(counts == 4) & (successes == k)]
+
+# --- HELPER 2: Stratified t-SNE Plotter ---
+def plot_stratified_clusters(viz_df, tsne_proj, unique_clusters, k_levels=[0, 1, 2, 3, 4]):
+    """
+    Plots the same t-SNE projection multiple times, filtering by observed difficulty (k).
+    """
+    viz_df = viz_df.copy()
+    if 'x' not in viz_df.columns:
+        viz_df['x'], viz_df['y'] = tsne_proj[:, 0], tsne_proj[:, 1]
+    
+    palette_colors = sns.color_palette("turbo", n_colors=len(unique_clusters))
+    cluster_cmap = dict(zip(unique_clusters, palette_colors))
+    
+    n_plots = len(k_levels)
+    fig, axes = plt.subplots(1, n_plots, figsize=(4 * n_plots, 5), sharex=True, sharey=True)
+    if n_plots == 1: axes = [axes]
+
+    print(f"Generating Stratified Plots for k={k_levels}...")
+
+    for i, k in enumerate(k_levels):
+        ax = axes[i]
+        subset = get_difficulty_slice(viz_df, k)
+        
+        # Background
+        ax.scatter(viz_df['x'], viz_df['y'], c='#ecf0f1', s=10, alpha=0.3)
+        
+        if len(subset) > 0:
+            # Foreground
+            sns.scatterplot(
+                data=subset, x='x', y='y', hue='Cluster', 
+                palette=cluster_cmap, s=60, alpha=0.9, 
+                ax=ax, legend=False, edgecolor='k', linewidth=0.5
+            )
+            
+            # Annotate
+            top_clusters = subset['Cluster'].value_counts().head(3).index
+            for c in top_clusters:
+                sub_c = subset[subset['Cluster'] == c]
+                cx, cy = sub_c['x'].median(), sub_c['y'].median()
+                ax.text(cx, cy, f"C{c}", ha='center', va='center', 
+                        fontsize=8, fontweight='bold',
+                        bbox=dict(boxstyle="circle,pad=0.2", fc="white", ec=cluster_cmap.get(c, 'k'), alpha=0.8))
+
+        ax.set_title(f"Difficulty k={k}\n({k}/4 Correct)", fontsize=11)
+        ax.axis('off')
+
+    plt.tight_layout()
+    plt.show()
+
+# --- HELPER 3: Pairwise Cluster Comparison (Corrected) ---
+def get_pairwise_stats_raw(df, unique_clusters):
+    """
+    Calculates raw stats (N and Diff) for cluster pairs on SHARED questions.
+    Returns a dataframe with columns ['c1', 'c2', 'N', 'Diff'].
+    """
+    if 'question_id_external' not in df.columns:
+        return pd.DataFrame(columns=['c1', 'c2', 'N', 'Diff'])
+
+    # 1. Calculate average accuracy per question per cluster
+    q_stats = df.groupby(['Cluster', 'question_id_external'])['Correct'].mean()
+    
+    results = []
+    
+    # Iterate all pairs
+    for c1, c2 in combinations(unique_clusters, 2):
+        if c1 not in q_stats or c2 not in q_stats:
+            continue
+            
+        # Get set of questions in each cluster
+        q1 = q_stats.loc[c1]
+        q2 = q_stats.loc[c2]
+        
+        # Find Intersection
+        shared_qs = q1.index.intersection(q2.index)
+        n_shared = len(shared_qs)
+        
+        if n_shared > 0:
+            acc1 = q1.loc[shared_qs]
+            acc2 = q2.loc[shared_qs]
+            diff = (acc1 - acc2).mean()
+            
+            results.append({
+                'c1': c1,
+                'c2': c2,
+                'N': n_shared,
+                'Diff': diff
+            })
+            
+    return pd.DataFrame(results)
+
+
+from matplotlib.colors import ListedColormap
+
+def plot_difficulty_discrimination(viz_df):
+    """
+    Plots a normalized stacked bar chart showing the difficulty composition of each cluster.
+    Answers: "Is Cluster X mostly made of Hard questions or Easy questions?"
+    """
+    if 'obs_k' not in viz_df.columns:
+        return
+
+    # 1. Prepare Data: Crosstab of Cluster vs Difficulty (k)
+    # We use 'question_id_external' to count uniquely if possible, otherwise use rows
+    # Using rows (responses) is generally fine for response-level clustering
+    cross_tab = pd.crosstab(viz_df['Cluster'], viz_df['obs_k'])
+    
+    # Normalize row-wise to get percentages (so each bar is 100% height)
+    cross_tab_norm = cross_tab.div(cross_tab.sum(axis=1), axis=0) * 100
+    
+    # 2. Setup Colors (Matching your previous Red->Green scheme)
+    # k=0 (Hard/Red) -> k=4 (Easy/Green)
+    custom_colors = ['#c0392b', '#e67e22', '#f1c40f', '#3498db', '#2ecc71']
+    cmap = ListedColormap(custom_colors)
+
+    # 3. Plot
+    ax = cross_tab_norm.plot(
+        kind='bar', 
+        stacked=True, 
+        figsize=(12, 6), 
+        colormap=cmap,
+        edgecolor='black',
+        linewidth=0.5
+    )
+    
+    # 4. Styling
+    plt.title("Cluster 'Difficulty' Discrimination", fontsize=14)
+    plt.ylabel("Composition (%)", fontsize=12)
+    plt.xlabel("Cluster ID", fontsize=12)
+    plt.xticks(rotation=0)
+    
+    # Legend: Reverse order so k=4 is at top (visually intuitive with the stack)
+    handles, labels = ax.get_legend_handles_labels()
+    plt.legend(handles[::-1], [f"k={l} (Correct {l}/4)" for l in labels[::-1]], 
+               title="Observed Difficulty", bbox_to_anchor=(1.02, 1), loc='upper left')
+    
+    # Add percentage labels inside bars if they are big enough
+    for c in ax.containers:
+        ax.bar_label(c, fmt='%.0f%%', label_type='center', color='white', fontsize=9, weight='bold', padding=0)
+
+    plt.tight_layout()
+    plt.show()
+
+# --- MAIN FUNCTION ---
 def run_failure_modes_dashboard(train_df, exp_info, features=['Entropy', 'LogitGap', 'Heuristic', 'Mechanistic'], test_df=None, min_clusters = 3):
+    """
+    Generates HTML dashboard, t-SNE plot, and Pairwise Cluster Analysis.
+    """
+    if train_df is None: return
+    exp_id, exp_name = exp_info
+    
+    # --- 1. FIT & PREDICT (Train & Test) ---
+    scaler = StandardScaler()
+    X_train = scaler.fit_transform(train_df[features].fillna(0))
+    
+    # Fit KMeans
+    n_clusters = min(min_clusters, len(train_df)//10) if len(train_df) > 50 else 3
+    kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=5)
+    train_df = train_df.copy() 
+    train_df['Cluster'] = kmeans.fit_predict(X_train)
+    
+    if test_df is not None:
+        test_df = test_df.copy()
+        X_test = scaler.transform(test_df[features].fillna(0))
+        test_df['Cluster'] = kmeans.predict(X_test)
+        viz_df = test_df 
+        mode_label = "Train & Test Analysis"
+        
+        # Pre-calc info for stratification
+        if 'question_id_external' in test_df.columns:
+            test_df['obs_k'] = test_df.groupby('question_id_external')['Correct'].transform('sum')
+            test_df['is_valid_k'] = test_df.groupby('question_id_external')['Correct'].transform('count') == 4
+    else:
+        viz_df = train_df
+        mode_label = "Train Only Analysis"
+
+    # --- 2. HTML DASHBOARD GENERATION ---
+    ref_df = train_df
+    global_medians = ref_df[features].median()
+    global_sds = ref_df[features].std()
+    
+    html_out = [DASHBOARD_CSS, f'<div class="db-container">']
+    html_out.append(f'<div class="db-header"><h2>Run: {exp_name} (ID: {exp_id})</h2><small>{mode_label}</small></div>')
+
+    stat_cards = "".join([f'<div class="db-stat-card"><div class="db-stat-val">{global_medians[f]:.3f}</div><div class="db-stat-label">{f}</div></div>' for f in features])
+    html_out.append(f'<div class="db-stat-grid">{stat_cards}</div>')
+
+    unique_clusters = sorted(train_df['Cluster'].unique())
+    train_acc_map = {} # Store for label generation later
+
+    for c in unique_clusters:
+        sub_train = train_df[train_df['Cluster'] == c]
+        sub_test = test_df[test_df['Cluster'] == c] if test_df is not None else pd.DataFrame()
+        
+        # Stats
+        n_train = len(sub_train)
+        acc_train = (sub_train['Correct'].sum() / n_train * 100) if n_train > 0 else 0
+        train_acc_map[c] = acc_train
+        
+        n_test = len(sub_test)
+        if n_test > 0:
+            acc_test = (sub_test['Correct'].sum() / n_test * 100)
+            test_info = f"<span style='color:#2c3e50'>Test: N={n_test} ({acc_test:.1f}%)</span>"
+            acc_color = "var(--success)" if acc_test >= 80 else ("var(--warning)" if acc_test >= 50 else "var(--danger)")
+            bar_width = acc_test
+        else:
+            acc_test = 0
+            test_info = "<span style='color:#95a5a6'>Test: N=0</span>"
+            acc_color = "#bdc3c7"
+            bar_width = 0
+
+        # Difficulty Bar
+        diff_stats_html = ""
+        if n_test > 0 and 'obs_k' in sub_test.columns:
+            valid_sub = sub_test[sub_test['is_valid_k'] == True]
+            if len(valid_sub) > 0:
+                k_counts = valid_sub['obs_k'].value_counts().sort_index()
+                total_valid = len(valid_sub)
+                k_colors = {0: '#c0392b', 1: '#e67e22', 2: '#f1c40f', 3: '#3498db', 4: '#2ecc71'}
+                diff_bars = []
+                for k_val in range(5):
+                    count = k_counts.get(k_val, 0)
+                    if count > 0:
+                        pct = (count / total_valid) * 100
+                        diff_bars.append(f'<div style="width:{pct}%; background:{k_colors[k_val]}; height:8px;" title="k={k_val}: {pct:.1f}%"></div>')
+                
+                diff_stats_html = f"""
+                <div style="margin-top:10px; font-size:0.8em; color:#7f8c8d;">
+                    <div style="display:flex; justify-content:space-between; margin-bottom:2px;"><span>Difficulty Breakdown (Test)</span> <span style="font-size:0.9em">Observed Correctness</span></div>
+                    <div style="display:flex; width:100%; border-radius:3px; overflow:hidden; background:#eee;">{''.join(diff_bars)}</div>
+                    <div style="display:flex; justify-content:space-between; font-size:0.7em; margin-top:2px;">
+                        <span style="color:#c0392b">Hard (0/4)</span><span style="color:#2ecc71">Easy (4/4)</span>
+                    </div>
+                </div>
+                """
+
+        # Metrics Table
+        metrics_rows = ""
+        for f in features:
+            mu_train = sub_train[f].mean() if n_train > 0 else 0
+            mu_test = sub_test[f].mean() if n_test > 0 else 0
+            sd_test = sub_test[f].std() if n_test > 0 else 0
+            
+            if n_test > 0 and global_sds[f] != 0:
+                shift_val = (mu_test - global_medians[f]) / global_sds[f]
+            elif n_train > 0 and global_sds[f] != 0:
+                shift_val = (mu_train - global_medians[f]) / global_sds[f]
+            else:
+                shift_val = 0
+            
+            bar_color_m = "#c0392b" if shift_val > 1.0 else ("#2980b9" if shift_val < -1.0 else "#95a5a6")
+            vis_width = min(abs(shift_val) * 15, 50)
+            vis_left = "50%" if shift_val > 0 else f"{50 - vis_width}%"
+            
+            metrics_rows += f"""
+            <tr>
+                <td><b>{f}</b></td>
+                <td style="color:{bar_color_m}">{shift_val:+.2f} SD</td>
+                <td style="background:#f8f9fa">{mu_train:.3f}</td> 
+                <td style="font-weight:bold">{mu_test:.3f}</td>
+                <td style="color:#7f8c8d">{sd_test:.2f}</td>
+                <td style="width:100px"><div class="shift-bar-container"><div class="shift-bar" style="left:50%; width:1px; background:#ccc;"></div><div class="shift-bar" style="left:{vis_left}; width:{vis_width}%; background:{bar_color_m}; opacity:0.8;"></div></div></td>
+            </tr>
+            """
+
+        ex_source = sub_test if n_test > 0 else sub_train
+        ex_label = "Test Examples" if n_test > 0 else "Train Examples (No Test Data)"
+        
+        ex_rows = ""
+        for i, (_, row) in enumerate(ex_source.head(5).iterrows()):
+            badge = '<span class="status-badge-pass">✅ Correct</span>' if row['Correct'] else '<span class="status-badge-fail">❌ Incorrect</span>'
+            ex_rows += f'<div style="margin-bottom:10px;"><strong>[Ex {i+1}] {badge}</strong><br>Q: {row.get("question_text")}<br><div class="pred-box">Pred: {row.get("full_trace_text")}</div></div><hr>'
+
+        card_html = f"""
+        <div class="cluster-card">
+            <div class="cluster-head" style="border-left: 5px solid {acc_color}">
+                <div class="cluster-title">CLUSTER {c}</div>
+                <div class="acc-container" style="flex:1; justify-content:flex-end; gap:15px">
+                    <span style="color:#7f8c8d; font-size:0.9em">Train: N={n_train} ({acc_train:.1f}%)</span>
+                    <span style="border-left:1px solid #ccc; height:15px"></span>
+                    {test_info}
+                    <div class="acc-bar-bg" style="width:60px"><div class="acc-bar-fill" style="width: {bar_width}%; background: {acc_color};"></div></div>
+                </div>
+            </div>
+            <div style="padding: 15px;">
+                {diff_stats_html}
+                <table class="metric-table">
+                    <thead><tr><th>Metric</th><th>Shift (Test)</th><th style="background:#f8f9fa">Train μ</th><th>Test μ</th><th>Test σ</th><th>Vis</th></tr></thead>
+                    <tbody>{metrics_rows}</tbody>
+                </table>
+            </div>
+            <details>
+                <summary>View {ex_label} ({len(ex_source)})</summary>
+                <div class="ex-content">{ex_rows}</div>
+            </details>
+        </div>
+        """
+        html_out.append(card_html)
+        
+    html_out.append("</div>")
+    display(HTML("".join(html_out)))
+
+    # --- 3. t-SNE VISUALIZATION ---
+    print(f"Generating t-SNE on {mode_label}...")
+    tsne = TSNE(n_components=2, perplexity=min(30, len(viz_df)-1), random_state=42, init='pca')
+    proj = tsne.fit_transform(scaler.transform(viz_df[features].fillna(0)))
+    viz_df['x'], viz_df['y'] = proj[:, 0], proj[:, 1]
+    
+    palette_colors = sns.color_palette("turbo", n_colors=len(unique_clusters))
+    cluster_cmap = dict(zip(unique_clusters, palette_colors))
+
+    plt.figure(figsize=(14, 10))
+    sns.scatterplot(data=viz_df[viz_df['Correct']==1], x='x', y='y', color='#ecf0f1', s=60, alpha=0.3, linewidth=0, zorder=0)
+    sns.scatterplot(data=viz_df[viz_df['Correct']==0], x='x', y='y', hue='Cluster', palette=cluster_cmap, s=120, alpha=0.9, edgecolor='k', legend=False, zorder=10)
+
+    global_means = train_df[features].mean()
+    for c in unique_clusters:
+        sub_train = train_df[train_df['Cluster'] == c]
+        n_train = len(sub_train)
+        acc_train = sub_train['Correct'].mean() if n_train > 0 else 0
+        
+        label_text = f"C{c}\nTrain: N={n_train} | {acc_train:.0%}"
+        if test_df is not None:
+            sub_test = test_df[test_df['Cluster'] == c]
+            n_test = len(sub_test)
+            acc_test = sub_test['Correct'].mean() if n_test > 0 else 0
+            label_text += f"\nTest: N={n_test} | {acc_test:.0%}"
+
+        label_text += "\n" + generate_label(sub_train, features, global_means, global_sds)
+
+        sub_viz = viz_df[viz_df['Cluster'] == c]
+        failures = sub_viz[sub_viz['Correct'] == 0]
+        target = failures if len(failures) > 3 else sub_viz
+        if len(target) == 0: continue
+            
+        cx, cy = target['x'].median(), target['y'].median()
+        plt.text(cx, cy, label_text, horizontalalignment='center', verticalalignment='center',
+                 fontsize=8, fontweight='bold', color='black',
+                 bbox=dict(boxstyle="round,pad=0.4", fc="white", ec=cluster_cmap[c], lw=2, alpha=0.9), zorder=20)
+    plt.title(f"Response Clustering Analysis", fontsize=16)
+    plt.axis('off')
+    plt.tight_layout()
+    plt.show()
+
+    # --- 4. DIFFICULTY STRATIFICATION ---
+    if test_df is not None and 'obs_k' in viz_df.columns:
+        print("Generating Difficulty Stratification Plots...")
+        plot_stratified_clusters(
+            viz_df=viz_df, 
+            tsne_proj=proj,
+            unique_clusters=unique_clusters,
+            k_levels=[0, 1, 2, 3, 4] 
+        )
+
+        print("Generating Discrimination Bar Chart...")
+        plot_difficulty_discrimination(viz_df)
+
+    # --- 5. CLUSTER PAIRWISE ANALYSIS (FIXED) ---
+    print("\n--- Pairwise Cluster Comparison (Same Question Overlap) ---")
+    
+    # Calculate Raw Stats (N, Diff) for Train and Test separately
+    train_raw = get_pairwise_stats_raw(train_df, unique_clusters)
+    test_raw = pd.DataFrame(columns=['c1', 'c2', 'N', 'Diff'])
+    if test_df is not None:
+        test_raw = get_pairwise_stats_raw(test_df, unique_clusters)
+
+    # Merge ON CLUSTER IDS (c1, c2) to align rows correctly
+    if not train_raw.empty or not test_raw.empty:
+        merged = pd.merge(
+            train_raw, 
+            test_raw, 
+            on=['c1', 'c2'], 
+            how='outer', 
+            suffixes=('_Train', '_Test')
+        ).fillna(0)
+        
+        # Now construct the display label row-by-row
+        pairs = []
+        for _, row in merged.iterrows():
+            c1, c2 = int(row['c1']), int(row['c2'])
+            acc1 = train_acc_map.get(c1, 0)
+            acc2 = train_acc_map.get(c2, 0)
+            
+            pairs.append(f"C{c1} ({acc1:.1f}%) vs C{c2} ({acc2:.1f}%)")
+        
+        merged['Pair'] = pairs
+        
+        # Rename and Select Final Columns
+        merged = merged.rename(columns={
+            'N_Train': 'Train_N', 'Diff_Train': 'Train_Diff',
+            'N_Test': 'Test_N', 'Diff_Test': 'Test_Diff'
+        })
+        
+        final_df = merged[['Pair', 'Train_N', 'Train_Diff', 'Test_N', 'Test_Diff']]
+        
+        # Stylize
+        def color_diff(val):
+            if val == 0: return 'color: #95a5a6' 
+            color = '#c0392b' if val < -0.1 else ('#27ae60' if val > 0.1 else 'black')
+            return f'color: {color}; font-weight: bold'
+
+        display(
+            final_df.style.format({
+                'Train_Diff': '{:+.1%}', 
+                'Test_Diff': '{:+.1%}',
+                'Train_N': '{:.0f}',
+                'Test_N': '{:.0f}'
+            })
+            .applymap(color_diff, subset=['Train_Diff', 'Test_Diff'])
+            .set_properties(**{'text-align': 'center'})
+            .set_table_styles([
+                # CSS Hack to hide index on pandas < 1.4.0
+                {'selector': '.row_heading', 'props': [('display', 'none')]}, 
+                {'selector': '.blank', 'props': [('display', 'none')]},
+                dict(selector='th', props=[('text-align', 'center')])
+            ])
+            .set_caption("Accuracy Delta on SHARED questions (Positive = First Cluster is Better)")
+        )
+
+    else:
+        print("No shared questions found between clusters (or no ID column).")
+
+    return PredictorArtifact(
+        model=kmeans,
+        scaler=scaler,
+        features=features,
+        mode='clustering',
+        label_map={}
+    )
+
+
+
+    
+def run_failure_modes_dashboard_old(train_df, exp_info, features=['Entropy', 'LogitGap', 'Heuristic', 'Mechanistic'], test_df=None, min_clusters = 3):
     """
     Generates the HTML dashboard and t-SNE plot.
     Fits clustering on train_df, but calculates and reports stats for BOTH Train and Test.
