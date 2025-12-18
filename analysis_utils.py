@@ -791,7 +791,7 @@ def run_failure_modes_dashboard(train_df, exp_info, features=['Entropy', 'LogitG
         cluster_cmap = dict(zip(unique_clusters, palette_colors))
 
         plt.figure(figsize=(14, 10))
-        sns.scatterplot(data=viz_df[viz_df['Correct']==1], x='x', y='y', color='#ecf0f1', s=60, alpha=0.3, linewidth=0, zorder=0)
+        sns.scatterplot(data=viz_df[viz_df['Correct']==1], x='x', y='y', hue='Cluster', palette=cluster_cmap, s=60, alpha=0.2, edgecolor='k', legend=False, linewidth=0, zorder=0)#color='#ecf0f1', s=60, alpha=0.3, linewidth=0, zorder=0)
         sns.scatterplot(data=viz_df[viz_df['Correct']==0], x='x', y='y', hue='Cluster', palette=cluster_cmap, s=120, alpha=0.9, edgecolor='k', legend=False, zorder=10)
 
         global_means = train_df[features].mean()
