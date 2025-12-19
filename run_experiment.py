@@ -1,7 +1,6 @@
 """
 run_experiment.py
-Orchestrator: Phase 1 (Gen) -> Phase 2 (Grading).
-Optimized with Batch Logging to prevent I/O blocking during generation.
+Orchestrator: Phase 1 (Generation) -> Phase 2 (Grading).
 """
 import os
 import gc
@@ -97,7 +96,7 @@ def run_generation_phase(cfg: Dict, db: DBManager):
             except Exception as e:
                 print(f"Error Q{row['id']}: {e}")
 
-        # Cleanup Model (Crucial for Mac/Local Runs)
+        # Cleanup Model
         del agent
         gc.collect()
         if torch.cuda.is_available(): torch.cuda.empty_cache()

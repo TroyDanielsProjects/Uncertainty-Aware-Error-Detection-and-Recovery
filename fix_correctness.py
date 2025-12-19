@@ -3,18 +3,14 @@ import json
 import re
 from llama_cpp import Llama
 
-# --------------------
 # Config
-# --------------------
 DB_PATH = "db/results.sqlite"
 MODEL_PATH = "models/mistral-7b-instruct.Q4_K_M.gguf"
 BATCH_SIZE = 4
 CTX = 4096
 
-# --------------------
-# Load model (Metal / MPS)
-# --------------------
-print(f"Loading model from {MODEL_PATH}...")
+# Load Model
+print(f"Loading model from {MODEL_PATH}")
 llm = Llama(
     model_path=MODEL_PATH,
     n_ctx=CTX,
@@ -23,16 +19,10 @@ llm = Llama(
     verbose=False,
 )
 
-# --------------------
-# Robust JSON Parsing (Fixes Invalid \escape & Extra data)
-# --------------------
+# Json Parsing
 def parse_json_safe(text: str):
-    """
-    Robustly parses JSON, handling:
-    1. 'Extra data': via Regex extraction.
-    2. 'Invalid \escape': via automatic backslash sanitization fallback.
-    """
-    # 1. Regex to find the JSON object (ignores text before/after)
+    
+    #regex to find json
     match = re.search(r"(\{.*\})", text, re.DOTALL)
     if not match:
         return {}
@@ -49,11 +39,10 @@ def parse_json_safe(text: str):
             fixed_str = json_str.replace("\\", "\\\\")
             return json.loads(fixed_str)
         except:
-            # If it still fails, return empty to prevent script crash
+            # If it still fails, return empty to prevent crash
             return {}
 
 def run_llm_completion(prompt):
-    """Runs the LLM with low temperature for deterministic output."""
     out = llm(
         prompt,
         max_tokens=64,  # Keep it short
@@ -62,9 +51,7 @@ def run_llm_completion(prompt):
     )
     return parse_json_safe(out["choices"][0]["text"])
 
-# --------------------
 # Two-Step Grader Logic (Extract -> Compare)
-# --------------------
 def step1_extract_value(full_trace):
     """Step 1: Blind extraction of the student's answer."""
     # Slice the last 2500 chars to ensure the final answer is in context
@@ -120,9 +107,7 @@ def local_grade(question, gold_answer, full_trace):
         "reason": f"Extracted: {extracted}"
     }
 
-# --------------------
 # DB Setup
-# --------------------
 conn = sqlite3.connect(DB_PATH)
 cur = conn.cursor()
 
@@ -135,9 +120,6 @@ if "old_correct" not in cols:
     cur.execute("UPDATE Results SET old_correct = is_correct")
     conn.commit()
 
-# --------------------
-# Fetch rows
-# --------------------
 cur.execute("""
     SELECT result_id, question_text, full_trace_text, gold_answer
     FROM Results
@@ -146,9 +128,7 @@ rows = cur.fetchall()
 
 print(f"Regrading {len(rows)} rows using Two-Step Local LLM")
 
-# --------------------
 # Regrade Loop
-# --------------------
 for i in range(0, len(rows), BATCH_SIZE):
     batch = rows[i:i + BATCH_SIZE]
 
@@ -184,4 +164,4 @@ for i in range(0, len(rows), BATCH_SIZE):
     print(f"Regraded {min(i + BATCH_SIZE, len(rows))}/{len(rows)}")
 
 conn.close()
-print("✅ Regrading complete using Two-Step Logic")
+print("Regrading complete using Two-Step Logic")

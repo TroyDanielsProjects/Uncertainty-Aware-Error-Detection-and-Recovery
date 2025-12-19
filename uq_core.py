@@ -24,7 +24,7 @@ _C_VEC = None
 
 try:
     from sentence_transformers import SentenceTransformer, util
-    # Load lightweight model (~80MB on first run)
+    # Load lightweight model
     _MODEL = SentenceTransformer("all-MiniLM-L6-v2")
     
     _U_WORDS = ["maybe", "perhaps", "unlikely", "doubtful", "unclear", "possible", "guess", "assume", "speculate"]
@@ -60,7 +60,7 @@ class Trace:
     entropies: List[float] = field(default_factory=list)
     top1_logprobs: List[float] = field(default_factory=list)
     top2_logprobs: List[float] = field(default_factory=list)
-    activations: Optional[np.ndarray] = None # Aligned [Seq, Dim]
+    activations: Optional[np.ndarray] = None
     
     def get(self, key: str, default: Any = None) -> Any:
         return getattr(self, key, default)
@@ -72,7 +72,8 @@ class UncertaintyVector:
     heuristic_score: float
     mechanistic_score: float
     semantic_entropy: float = 0.0
-    # --- NEW FIELDS ---
+    
+    # Traces
     mech_trace: List[float] = field(default_factory=list)
     entropy_trace: List[float] = field(default_factory=list)
     logit_gap_trace: List[float] = field(default_factory=list)
@@ -98,7 +99,7 @@ class ActivationMonitor:
         return None
 
     def _hook(self, _, __, output):
-        # OPTIMIZATION: Keep on device to avoid CPU sync bottleneck during generation
+
         t = output[0] if isinstance(output, tuple) else output
         self.activations.append(t.detach()) 
 
@@ -113,14 +114,12 @@ class ActivationMonitor:
         if not self.activations: return None
         try:
             # Normalize shapes: [B, S, D] (prefill) vs [B, D] (decode) -> [B, Total, D]
-            # Processing happens here (post-generation) to minimize latency impact
+
             stack = torch.cat([t if t.ndim == 3 else t.unsqueeze(1) for t in self.activations], dim=1)
             
-            # Align: Gen token i comes from Prompt token i-1
             start = max(0, prompt_len - 1)
             end = start + gen_len
             
-            # Slice first, THEN move to CPU to save bandwidth
             if stack.shape[1] < end: 
                 relevant = stack[:, -gen_len:, :]
             else:
@@ -150,7 +149,7 @@ class MetricComputer:
         """
         if not text: return 0.0
         
-        # 1. Semantic Embedding Logic (Preferred, but slow)
+        # 1. Heuristic Score Via Semantic Embedding Logic
         if use_embeddings and _HAS_ST and _MODEL is not None:
             try:
                 emb = _MODEL.encode(text)
@@ -163,7 +162,7 @@ class MetricComputer:
             except Exception:
                 pass # Fall through to keywords on error
 
-        # 2. Keyword Fallback (Fast)
+        # 2. Keyword Fallback (unused)
         hedges = {"might", "perhaps", "possibly", "unclear", "maybe", "assume", "unlikely"}
         words = text.lower().split()
         if not words: return 0.0
@@ -178,30 +177,26 @@ class MetricComputer:
 
     @staticmethod
     def mechanistic_score(acts: Optional[np.ndarray]) -> List[float]:
-        # CHANGED: Returns List[float] (per token) instead of float (mean)
         if acts is None or _ENTROPY_INDICES is None or not _ENTROPY_INDICES.size: return []
         try:
             valid = _ENTROPY_INDICES[_ENTROPY_INDICES < acts.shape[-1]]
             if not valid.size: return []
-            # CHANGED: Removed outer np.mean()
             return np.tanh(np.mean(acts[..., valid], axis=-1) * 0.5).tolist()
         except Exception: return []
 
     @classmethod
     def compute_vector(cls, trace: Trace) -> UncertaintyVector:
         gap = cls.logit_gap(trace.top1_logprobs, trace.top2_logprobs)
-        # CHANGED: Capture trace list
+
         mech_raw = cls.mechanistic_score(trace.activations)
         
         return UncertaintyVector(
             avg_entropy=float(np.mean(trace.entropies)) if trace.entropies else 0.0,
             min_logit_gap=float(np.min(gap)) if gap.size else 0.0,
-            # Disable embeddings for fast generation
             heuristic_score=cls.calculate_heuristic_score(trace.text, use_embeddings=True), 
-            # CHANGED: Explicit mean for scalar score
             mechanistic_score=float(np.mean(mech_raw)) if mech_raw else 0.0,
             
-            # --- POPULATE TRACES ---
+            # traces (token level)
             mech_trace=mech_raw,
             entropy_trace=trace.entropies,
             logit_gap_trace=gap.tolist(),
@@ -302,7 +297,7 @@ def calibrate_model(model_name: str, save_path: str, k: int = 5):
         model = AutoModelForCausalLM.from_pretrained(model_name, device_map="cpu", trust_remote_code=True)
         # Extract last MLP layer weights
         if hasattr(model, 'model'): layer = model.model.layers[-1] # Llama
-        else: layer = model.transformer.h[-1] # GPT
+        else: layer = model.transformer.h[-1]
         
         Wout = layer.mlp.down_proj.weight.float().detach()
         WU = model.lm_head.weight.float().detach()
