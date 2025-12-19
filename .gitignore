@@ -1,0 +1,36 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Experiment outputs
+output/
+outputs/
+db/
+gpt_inputs
+# Model weights / HF caches
+*.pt
+*.bin
+*.safetensors
+huggingface/
+hf_cache/
+*.png
+*.sqlite
+
+
+# Transformers / local model dirs
+models/
+checkpoints/
+
+# Calibration artifacts (entropy neuron indices)
+config/*.json
+
+# OS / Editor
+.DS_Store
+.vscode/
+.idea/
+*.swp
+db/results.sqlite
