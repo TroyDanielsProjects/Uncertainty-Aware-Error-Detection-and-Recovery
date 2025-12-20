@@ -17,7 +17,6 @@ gpt_inputs
 *.safetensors
 huggingface/
 hf_cache/
-*.png
 *.sqlite
 
 
