@@ -1,0 +1,13 @@
+torch>=2.0.0
+pandas
+datasets
+tqdm
+transformers
+accelerate
+bitsandbytes
+scipy
+seaborn
+numpy
+matplotlib
+screen
+unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git
