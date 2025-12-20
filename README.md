@@ -25,6 +25,7 @@ We employ a **multi-signal pipeline** to capture complementary uncertainty metri
 * **Min Logit Gap**: Over a sequence, the minimum difference in log-probability between the top-1 and top-2 tokens.
 * **Mechanistic Uncertainty**: Activation variance from specific "entropy neurons" in the final MLP layer.
 * **Heuristic Confidence**: Semantic distance between the generation and fixed "certainty" vs. "uncertainty" anchor embeddings (e.g., "I am sure" vs. "maybe").
+* **Length**: Length of the response in tokens (added later as a baseline)
 
 **B. Multi-Sample Metrics (Ensemble)**
 
