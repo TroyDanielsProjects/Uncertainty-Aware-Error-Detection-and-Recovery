@@ -208,7 +208,7 @@ if __name__ == "__main__":
         for r in range(1, len(base_stats) + 1):
             stat_combinations.extend(itertools.combinations(base_stats, r))
         
-        for epoch in range(20, 150, 10):
+        for epoch in range(20, 130, 50):
             # --- 2. Run Baseline Experiments (All Subsets) ---
             for stats_tuple in stat_combinations:
                 stats_list = list(stats_tuple)

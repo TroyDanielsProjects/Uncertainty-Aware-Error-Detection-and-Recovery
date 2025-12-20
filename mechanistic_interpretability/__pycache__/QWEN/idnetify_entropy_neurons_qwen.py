@@ -10,8 +10,8 @@ from transformers import AutoModelForCausalLM
 class Entropy_Neurons_Identification:
 
     def __init__(self, 
-             model_name="unsloth/Meta-Llama-3.1-8B", 
-             output_path="entropy_neurons.json",
+             model_name="Qwen/Qwen2.5-1.5B-Instruct", 
+             output_path="entropy_neurons_qwen.json",
              dtype = torch.float32,
              device = 'cpu',
              k=10):
@@ -47,7 +47,7 @@ class Entropy_Neurons_Identification:
             print(f"Error: Could not identify necessary layers in {model_name}.")
 
 
-    def identify(self, identify_by_cosine_sim=False, identify_by_variance=True, identify_by_max_std_dev=True, file_name='entropy_neurons.json'):
+    def identify(self, identify_by_cosine_sim=False, identify_by_variance=True, identify_by_max_std_dev=True):
         """
         Identifies Entropy Neurons based on Normalized Logit Attribution Variance (Cosine Similarity).
         
@@ -87,7 +87,7 @@ class Entropy_Neurons_Identification:
         else:
             entropy_neurons = torch.tensor([], dtype=torch.long)
 
-        with open(file_name, 'w') as file:
+        with open('data_qwen.json', 'w') as file:
             # 3. Dump the list into the file
             # indent=4 makes it readable (pretty-printed)
             json.dump(entropy_neurons.tolist(), file, indent=4)
@@ -103,8 +103,6 @@ class Entropy_Neurons_Identification:
         variances = []
 
         print("Calculating normalized logit variances per neuron...")
-
-        d_mlp = self.Wout.shape[1]
         
         for i in tqdm(range(0, d_mlp, batch_size)):
             d_mlp = self.Wout.shape[1] 
@@ -145,4 +143,4 @@ class Entropy_Neurons_Identification:
 
 if __name__ == "__main__":
     identify_neurons = Entropy_Neurons_Identification()
-    identify_neurons.identify(identify_by_cosine_sim=True, identify_by_max_std_dev=False, file_name='cosine_var_entropy_neurons.json')
+    identify_neurons.identify()

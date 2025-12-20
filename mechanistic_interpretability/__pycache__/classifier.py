@@ -142,7 +142,7 @@ def normalize_data(df):
 
 if __name__ == "__main__":
     # --- Data Prep ---
-    df, neuron_cols = load_and_prep_data("./gsm8k_analysis_results.csv")
+    df, neuron_cols = load_and_prep_data("./gsm8k_analysis_results_qwen.csv")
     X_df = aggregate_df(df, neuron_cols)
 
     # --- NEW: Balance the Dataset ---

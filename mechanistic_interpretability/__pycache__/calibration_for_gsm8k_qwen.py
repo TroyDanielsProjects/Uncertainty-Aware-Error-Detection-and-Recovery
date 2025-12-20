@@ -68,7 +68,7 @@ class GSM8KEvaluator:
         except ValueError:
             return False
 
-    def evaluate(self, num_samples: int = None, output_file: str = "gsm8k_analysis_results.csv", skip = 0):
+    def evaluate(self, num_samples: int = None, output_file: str = "gsm8k_analysis_qwen_results.csv", skip = 0):
         """
         Runs the evaluation loop on GSM8K.
         """
@@ -167,28 +167,28 @@ if __name__ == "__main__":
         print(f"Device is set to: {device}")
 
         model = AutoModelForCausalLM.from_pretrained(
-            "unsloth/Meta-Llama-3.1-8B",
+            "Qwen/Qwen2.5-1.5B-Instruct",
             dtype=torch.bfloat16,
             device_map=device, 
             low_cpu_mem_usage=True,
             trust_remote_code=True 
         )
          # Set the tokenizer for the model
-        tokenizer = AutoTokenizer.from_pretrained("unsloth/Meta-Llama-3.1-8B")
+        tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct")
         print("Loaded in model successfully")
     except Exception as e:
-        print(f"Failed to load model unsloth/Meta-Llama-3.1-8B: {e}")
+        print(f"Failed to load model Qwen/Qwen2.5-1.5B-Instruct: {e}")
 
     evaluator = GSM8KEvaluator(
         model=model,
         tokenizer=tokenizer,
-        neuron_indices_path='cosine_var_entropy_neurons.json',
-        layer_name='model.layers.31.mlp.down_proj', 
+        neuron_indices_path='data_qwen.json',
+        layer_name='model.layers.27.mlp.down_proj', 
         use_input=True
     )
     
     # Run a quick test
     try:
-        evaluator.evaluate(num_samples=500, output_file='gsm8k_analysis_cosine_neurons.csv')
+        evaluator.evaluate(num_samples=500, output_file='gsm8k_analysis_results_qwen.csv')
     except Exception as e:
         print(f"Test run skipped or failed (expected if datasets not installed): {e}")
