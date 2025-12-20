@@ -118,3 +118,16 @@ jupyter notebook analysis_notebook.ipynb
 * `fix_correctness.py`: **Regrader**. Uses a stronger local LLM to verify "Gold vs. Prediction" correctness labels in the database.
 * `consistency_dwt_simple.ipynb`: **Consistency Module**. Calculates the similarity vectors between reasoning traces.
 * `fix_semantic.ipynb`: **Semantic Refinement**. Utility to regenerate semantic entropy scores if definitions change.
+
+### **Mechanistic Interpretability** (`mechanistic_interpretability_code`)
+
+* `Notebooks/entropy_neurons.ipynb`: **Entropy-Neuron Search**. Exploratory notebook that surfaces high-variance neurons, plots scatter views (`entropy_neuron_scatter.png`), and exports candidate IDs for downstream metrics.
+* `activations.json`: **Activation Snapshots**. Sample activations for 20 tracked neurons across representative prompts, used to sanity-check neuron behavior.
+* `data.json`, `data_qwen.json`, `cosine_var_entropy_neurons.json`: **Neuron ID Lists**. Final entropy-neuron indices for GSM8K (Llama) and Qwen experiments plus cosine-variance candidates.
+* `aime_results.csv`: **AIME Token Activations**. 15k+ token-level rows with per-neuron activations and correctness labels for the AIME benchmark.
+* `classifer_experiment_raw_data.csv`, `classifer_experiment_logger.txt`: **Classifier Benchmarks**. Accuracy/CI table and detailed logs for activation-based threshold/logit experiments.
+* `threshold_experiment_results/`: **Threshold Sweeps**. Per-neuron PNGs and logs showing correctness vs. activation thresholds.
+* `plots/`: **Visualization Gallery**. Activation trajectories, max/min/mean distributions, calibration curves, and Qwen-specific plots (`qwen/`, `max_activation/`, `min_activation/`, `max_activation_calibration/`, etc.).
+* `output/ScalingFactorVsNormilizationFactor.png`: **Scaling Sweep Plot**. Visualizes calibration scaling vs. normalization factors.
+* `Logit_Attribution.pdf`: **Logit Attribution Report**. Slide deck summarizing neuron-level logit lens findings.
+* `requirements.txt`: **Env Spec**. Python dependencies for reproducing mechanistic notebooks and plots.
