@@ -33,16 +33,35 @@ We employ a **multi-signal pipeline** to capture complementary uncertainty metri
 * **Consistency**: Roughly speaking, the cosine similarity between the embeddings of different traces.
 
 ## 3. Key Results
+
 Our analysis of the GSM8K benchmark yielded the following insights:
 
-* **Metric Efficacy**: Semantic Entropy is the strongest single predictor of correctness.
-* **Ensembling**: The ensemble of single-shot metrics did exhibit strong performance (~0.82 % AUROC).
-* **Clustering** Unsupervised clustering of the metrics yields an effective clustering of the test set by both difficulty and correctness. 
+### AUROC Performance
+
+| Model/Signal | Supervised AUROC | Unsupervised AUROC |
+|--------------|------------------|-------------------|
+| **Mini Ensemble** | **0.903** | 0.856 |
+| Ensemble (All) | 0.902 | 0.827 |
+| Semantic + Trajectory | 0.888 | 0.883 |
+| Semantic Entropy | 0.874 | 0.874 |
+| One-Shot Ensemble | 0.818 | 0.738 |
+| Mechanistic + Token | 0.814 | 0.780 |
+| Token Entropy | 0.811 | 0.777 |
+| Mechanistic Uncertainty | 0.767 | 0.750 |
+| Trajectory Consistency | 0.749 | 0.721 |
+
+*Note: "Mini Ensemble" = Semantic Entropy + Trajectory Consistency + Token Entropy. "One-Shot Ensemble" = Token Entropy + Length + Mechanistic Uncertainty + Logit Gap.*
+
+### Key Findings
+
+* **Metric Efficacy**: Semantic Entropy is the strongest single predictor (r = -0.59 with correctness).
+* **Signal Fusion**: Mini Ensemble (0.903 AUROC) outperforms Semantic Entropy alone (0.874).
+* **One-Shot Viability**: One-shot metrics achieve 0.818 AUROC without multi-sample overhead.
+* **Failure Mode Clustering**: K-means clustering identifies 5 distinct failure modes; cluster-based answer selection yields 15% accuracy gains on inconsistent responses.
 
 ![Clustering](images/clustering_scatter.png)
 
-
-*(See `analysis_notebook.ipynb` and presentation slides for detailed AUROC plots and cluster visualizations.)*
+*(See `analysis_notebook.ipynb` and [presentation slides](https://docs.google.com/presentation/d/1OAj8SOHCGSBd23gn-LX_c2d9Z8KcDni_l9_PK3ee9xc/edit?usp=sharing) for detailed AUROC plots and cluster visualizations.)*
 
 
 
@@ -132,3 +151,11 @@ jupyter notebook analysis_notebook.ipynb
 * `output/ScalingFactorVsNormilizationFactor.png`: **Scaling Sweep Plot**. Visualizes calibration scaling vs. normalization factors.
 * `Logit_Attribution.pdf`: **Logit Attribution Report**. Slide deck summarizing neuron-level logit lens findings.
 * `requirements.txt`: **Env Spec**. Python dependencies for reproducing mechanistic notebooks and plots.
+
+### **Step-Level Divergence Analysis** (`step_level`) - *Exploratory/Future Work*
+
+This folder contains preliminary work on localizing *where* in multi-step reasoning uncertainty emerges, using Dynamic Time Warping (DTW) to align variable-length trajectories. See the paper (Section III-B, VII-C) for methodology details.
+
+* `step_level_analysis.ipynb`: **Main Notebook**. Implements trajectory generation, DTW alignment, and step-level divergence analysis.
+
+**Key Insight**: Preliminary analysis suggests uncertainty often concentrates at the final answer formulation step rather than being distributed throughout reasoning (15/20 problems showed "Final >> Trajectory" pattern).
