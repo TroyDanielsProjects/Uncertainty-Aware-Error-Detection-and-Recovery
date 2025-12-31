@@ -33,3 +33,6 @@ config/*.json
 .idea/
 *.swp
 db/results.sqlite
+
+# Data in unified pipeline
+unified_pipeline/data/datasets/*
