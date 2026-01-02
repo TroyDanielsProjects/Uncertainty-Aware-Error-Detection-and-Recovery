@@ -29,6 +29,8 @@ class ExperimentConfig:
     output_dir: str
     mech_interp_ident: List[str]
     entropy_neurons: int
+    data_size: int
+    semantic_runs: int
 
 
 # -------------------------
@@ -62,6 +64,8 @@ class ExperimentRunner:
             uq_methods=self.config.uq_methods,
             mech_interp_ident_methods=self.config.mech_interp_ident,
             entropy_neurons=self.config.entropy_neurons,
+            data_size=self.config.data_size,
+            semantic_runs=self.config.semantic_runs,
             device=device
         )
 
@@ -143,6 +147,8 @@ def parse_args():
     parser.add_argument("--run_name", required=True)
     parser.add_argument("--output_dir", default="unified_pipeline/results")
     parser.add_argument("--entropy_neurons", type=positive_int, default=10)
+    parser.add_argument("--data_size", type=positive_int, default=0)
+    parser.add_argument("--semantic_runs", type=positive_int, default=10)
     parser.add_argument(
         "--uq_methods",
         nargs="+",
@@ -190,7 +196,9 @@ def main():
         run_name=args.run_name,
         output_dir=args.output_dir,
         mech_interp_ident=args.mech_interp_ident,
-        entropy_neurons=args.entropy_neurons
+        entropy_neurons=args.entropy_neurons,
+        data_size=args.data_size,
+        semantic_runs=args.semantic_runs
     )
     logger.info(f"Logging into Huggingface: {config.run_name}")
     login(token="") # I don't mind this for private repo, if made public needs to change

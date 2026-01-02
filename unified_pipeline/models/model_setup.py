@@ -45,6 +45,8 @@ class ModelSetup:
         uq_methods: list[str],
         mech_interp_ident_methods: list[str],
         entropy_neurons: int,
+        data_size: int,
+        semantic_runs: int,
         device: str
     ):
         self.device = device
@@ -54,6 +56,9 @@ class ModelSetup:
         self.entropic = False
         self.logit_gap = False
         self.semantic = False
+        self.heuristic = False
+        self.data_size = data_size
+        self.semantic_runs = semantic_runs
 
         logger.info(f"Initializing ModelSetup for {model_name} on {device}...")
         # will get torch dytpe from string
@@ -100,6 +105,10 @@ class ModelSetup:
         if "semantic" in uq_methods:
             logger.info("Initializing Semantic Metric")
             self.semantic = True
+
+        if "heuristic" in uq_methods:
+            logger.info("Initializing heuristic Metric")
+            self.heuristic = True
     
     def solve(self, prompt: str) -> Trace:
         """
@@ -188,14 +197,17 @@ class ModelSetup:
 
         if self.semantic:
             semantic = []
-            for _ in range(10): # NOTE - change this away from hardcoded
-                with torch.no_grad:
-                    gen_seq = self.model.generate(
+            for _ in range(self.semantic_runs):
+                with torch.no_grad():
+                    full_generation = self.model.generate(
                         **inputs, 
                         max_new_tokens=256,
-                        tempature=0.7,
+                        temperature=0.7,
+                        do_sample=True, 
                         pad_token_id=self.tokenizer.eos_token_id
-                    ).sequences[0, prompt_len:]
+                    )
+
+                    gen_seq = full_generation[0, prompt_len:]
                     text = self.tokenizer.decode(gen_seq, skip_special_tokens=True)
                     semantic.append(text)
             trace.semantic = semantic
@@ -212,8 +224,11 @@ class ModelSetup:
         else:
             logging.info("Save_trace set to false or output_path not given. Defaulting to not saving trace.")
             save_trace = False
+        
+        if self.data_size == 0:
+            self.data_size = len(dataset)
 
-        for row in tqdm(dataset[:1], desc=f"Running Experiment w {self.model_name}"):
+        for row in tqdm(dataset[:self.data_size], desc=f"Running Experiment w {self.model_name}"):
             try:
                 # A. Generate (Heavy GPU Work)
                 prompt = f"Question: {row["q"]}\nLet's think step by step.\nAnswer:"
@@ -226,9 +241,17 @@ class ModelSetup:
                 # We collect all data for this question first
                 if self.task == "gsm8k":
                     pred = MetricComputer.extract_answer_gsm8k(trace.text)
+
                 is_exact = MetricComputer.check_correctness(pred, row["gold"])
-                mechanistic = MetricComputer.aggregate_activations(trace.mechanistic)
-                avg_entropy = float(np.mean(trace.entropies)) if trace.entropies else 0.0
+
+                mechanistic = MetricComputer.aggregate_activations(trace.mechanistic) if trace.mechanistic else None
+                avg_entropy = float(np.mean(trace.entropies)) if trace.entropies else None
+                gap = MetricComputer.logit_gap(trace.top1_logprobs, trace.top2_logprobs) if trace.top1_logprobs else None
+                semantic_text = trace.semantic if trace.semantic else None
+
+                avg_entropy=float(np.mean(trace.entropies)) if trace.entropies else None
+                min_logit_gap=float(np.min(gap)) if gap.size else None
+                heuristic_score=MetricComputer.calculate_heuristic_score(trace.text, use_embeddings=True) if self.heuristic else None
                     
                 result_entry = {
                     "id": row.get("id"),
@@ -237,7 +260,10 @@ class ModelSetup:
                     "trace_txt": trace.text,
                     "is_exact": is_exact,
                     "mechanistic": mechanistic,
-                    "entropic": avg_entropy
+                    "entropic": avg_entropy,
+                    "min_logit_gap": min_logit_gap,
+                    "heurisitc_score": heuristic_score,
+                    "semantic_text": semantic_text
                 }
 
                 results.append(result_entry)
