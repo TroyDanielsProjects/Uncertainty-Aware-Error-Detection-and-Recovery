@@ -47,6 +47,7 @@ class ModelSetup:
         entropy_neurons: int,
         data_size: int,
         semantic_runs: int,
+        include_prefill: bool,
         device: str
     ):
         self.device = device
@@ -59,6 +60,7 @@ class ModelSetup:
         self.heuristic = False
         self.data_size = data_size
         self.semantic_runs = semantic_runs
+        self.include_prefill = include_prefill
 
         logger.info(f"Initializing ModelSetup for {model_name} on {device}...")
         # will get torch dytpe from string
@@ -142,7 +144,8 @@ class ModelSetup:
             return None
 
         # Process Output
-        gen_seq = out.sequences[0, prompt_len:] # NOTE - we are getting rid of prompt is this desirable??? could info not be save int the entropy and activations of the prompt???
+        start = 0 if self.include_prefill else prompt_len
+        gen_seq = out.sequences[0, start:] # NOTE - we are getting rid of prompt is this desirable??? could info not be save int the entropy and activations of the prompt???
         text = self.tokenizer.decode(gen_seq, skip_special_tokens=True)
         tokens = self.tokenizer.convert_ids_to_tokens(gen_seq)
 
@@ -179,7 +182,7 @@ class ModelSetup:
 
             if activations is not None:
                 # Remove prompt activations NOTE - may want to change
-                gen_activations = activations[prompt_len:, :]
+                gen_activations = activations[start:, :]
                 # Transpose: [Seq_Len, Neurons] -> [Neurons, Seq_Len]
                 activations_by_neuron = gen_activations.T.cpu()
 
@@ -213,23 +216,28 @@ class ModelSetup:
             trace.semantic = semantic
         return trace
     
-    def run(self, dataset, save_trace = False, output_path = None):
+    def run(self, dataset, output_path_results, processed_ids, save_trace = False, output_path_trace = None):
         logger.info(f"Starting run on dataset with {len(dataset)} examples...")
         results = []
 
-        if save_trace and output_path is not None:
-            logger.info(f"Saving the trace initilized. Clearing possible old file.")
-            with open(output_path, "w") as f:
-                pass
-        else:
-            logging.info("Save_trace set to false or output_path not given. Defaulting to not saving trace.")
+        if save_trace and output_path_trace is None:
+            logging.info("Save_trace set to true but output_path_trace not given. Defaulting to not saving trace.")
             save_trace = False
         
         if self.data_size == 0:
             self.data_size = len(dataset)
 
-        for row in tqdm(dataset[:self.data_size], desc=f"Running Experiment w {self.model_name}"):
+        check_if_exist = processed_ids is not None
+        subset = dataset[:self.data_size]
+
+        for i, row in enumerate(tqdm(subset, desc=f"Running Experiment w {self.model_name}")):
             try:
+                if check_if_exist:
+                    row_id = str(row.get("id", i))
+                    # SKIP if already done
+                    if row_id in processed_ids:
+                        continue
+
                 # A. Generate (Heavy GPU Work)
                 prompt = f"Question: {row["q"]}\nLet's think step by step.\nAnswer:"
                 trace = self.solve(prompt)
@@ -257,8 +265,8 @@ class ModelSetup:
                     "id": row.get("id"),
                     "pred": pred,
                     "gold": row["gold"],
-                    "trace_txt": trace.text,
                     "is_exact": is_exact,
+                    "trace_txt": trace.text,
                     "mechanistic": mechanistic,
                     "entropic": avg_entropy,
                     "min_logit_gap": min_logit_gap,
@@ -268,9 +276,13 @@ class ModelSetup:
 
                 results.append(result_entry)
 
+                with open(output_path_results, "a") as f:
+                    # dumps creates the string, write adds it, \n creates the "Line" in JSONL
+                    f.write(json.dumps(result_entry, cls=NumpyEncoder) + "\n")
+
                 if save_trace:
-                    with open(output_path, "a") as f:
-                        json.dump(asdict(trace), f, cls=NumpyEncoder, indent=4)
+                    with open(output_path_trace, "a") as f:
+                        f.write(json.dumps(asdict(trace), cls=NumpyEncoder) + "\n")
 
             except Exception as e:
                 logger.error(f"Error processing QID {row.get('id', '?')}: {e}")
