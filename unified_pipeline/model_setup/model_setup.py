@@ -8,8 +8,8 @@ import numpy as np
 import json
 from dataclasses import asdict
 
-from models.metrics.mech_interp.mech_interp import MechInterp
-from models.metric_computer import MetricComputer
+from model_setup.metrics.mech_interp.mech_interp import MechInterp
+from model_setup.metric_computer import MetricComputer
 
 logger = logging.getLogger(__name__)
 
@@ -271,7 +271,7 @@ class ModelSetup:
                     "entropic": avg_entropy,
                     "min_logit_gap": min_logit_gap,
                     "heurisitc_score": heuristic_score,
-                    "semantic_text": semantic_text
+                    "semantic_entropy": semantic_text # NOTE - this needs to be changed from the text to the score
                 }
 
                 results.append(result_entry)

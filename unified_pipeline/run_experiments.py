@@ -10,7 +10,7 @@ from huggingface_hub import login
 
 from data.dataloader import DataLoader
 from data.preprocessor import Preprocessor
-from models.model_setup import ModelSetup
+from model_setup.model_setup import ModelSetup
 
 
 # -------------------------
@@ -32,7 +32,6 @@ class ExperimentConfig:
     data_size: int
     semantic_runs: int
     include_prefill: bool
-    classifer: bool
 
 
 # -------------------------
@@ -79,8 +78,8 @@ class ExperimentRunner:
             self.config.output_dir,
             self.config.task,
             self.config.model_name,
-            f"{"_".join(self.config.uq_methods)}",
-            f"{"_".join(self.config.mech_interp_ident)}_{self.config.entropy_neurons}",
+            f"{'_'.join(self.config.uq_methods)}",
+            f"{'_'.join(self.config.mech_interp_ident)}_{self.config.entropy_neurons}",
             f"prefill_included_{self.config.include_prefill}"
         )
         os.makedirs(output_dir, exist_ok=True)
@@ -150,7 +149,7 @@ class ExperimentRunner:
 
 
         if self.config.save_trace:
-            results = model.run(
+            model.run(
                 dataset,
                 data_path_results,
                 processed_ids, 
@@ -158,7 +157,7 @@ class ExperimentRunner:
                 output_path_trace=data_path_trace
             )
         else:
-            results = model.run(dataset, data_path_results, processed_ids)
+            model.run(dataset, data_path_results, processed_ids)
 
 
 
@@ -181,7 +180,6 @@ def parse_args():
     parser.add_argument("--dtype", default="float16", choices=["float16", "bfloat16"])
     parser.add_argument("--preprocess", action="store_true")
     parser.add_argument("--include_prefill", action="store_false")
-    parser.add_argument("--classifer", action="store_true")
     parser.add_argument("--save_trace", action="store_false")
     parser.add_argument("--run_name", required=True)
     parser.add_argument("--output_dir", default="unified_pipeline/results")
@@ -207,13 +205,13 @@ def parse_args():
 # python3 unified_pipeline/run_experiments.py --run_name test1
 
 def setup_logging(run_name: str):
-    os.makedirs("logs", exist_ok=True)
+    os.makedirs("logs/experiments", exist_ok=True)
 
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s | %(levelname)s | %(message)s",
         handlers=[
-            logging.FileHandler(f"logs/{run_name}.log"),
+            logging.FileHandler(f"logs/experiments/{run_name}.log"),
             logging.StreamHandler(sys.stdout),
         ],
     )
@@ -239,7 +237,6 @@ def main():
         data_size=args.data_size,
         semantic_runs=args.semantic_runs,
         include_prefill=args.include_prefill,
-        classifer=args.classifer
     )
     logger.info(f"Logging into Huggingface: {config.run_name}")
     login(token="") # I don't mind this for private repo, if made public needs to change

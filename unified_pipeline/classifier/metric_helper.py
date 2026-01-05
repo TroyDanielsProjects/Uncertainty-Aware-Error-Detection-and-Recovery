@@ -3,158 +3,135 @@ import numpy as np
 import logging
 import os
 from typing import List, Tuple, Dict, Optional
+import itertools
 
 logger = logging.getLogger(__name__)
 
 class MetricHelper:
 
-    # Columns strictly for metadata tracking, not training
-    meta_cols = ["id", "pred", "gold", "trace_txt", "semantic_text", "semantic"]
+    meta_cols = ["id", "pred", "gold", "trace_txt"]
     label_col = "is_exact"
 
-    def load_and_prep_data(self, filepath: str, fill_na: bool = True):
-        """
-        Loads JSONL, flattens the 'mechanistic' dictionary into columns, 
-        and removes non-numeric metadata.
-        """
+    def load_and_prep_data(self, filepath: str, metrics: List[str], fill_na: bool = True):
         if not os.path.exists(filepath):
             raise FileNotFoundError(f"Could not find {filepath}")
             
-        # 1. Load Data
         df = pd.read_json(filepath, lines=True)
         logger.info(f"Loaded {len(df)} rows from {filepath}")
 
-        # 2. Flatten 'mechanistic' column (dict -> many columns)
+        # Filter columns strictly to what was requested + label
+        cols_to_keep = [self.label_col]
+        for col in df.columns:
+            if col in metrics:
+                cols_to_keep.append(col)
+        
+        if len(cols_to_keep) == 1:
+            logger.warning(f"Warning: Only label column found. Metrics {metrics} missing.")
+
+        df = df[cols_to_keep]
+
+        # Flatten 'mechanistic' if present
         if "mechanistic" in df.columns:
-            # Check if any row actually has data
             if df['mechanistic'].notna().any():
-                logger.info("Flattening 'mechanistic' dictionary into features...")
-                # Normalize flattens the dict keys into columns
+                logger.info("Flattening 'mechanistic' dictionary...")
                 mech_df = pd.json_normalize(df['mechanistic'])
-                
-                # Make sure indices align before concat
                 mech_df.index = df.index
-                
-                # Concatenate and drop original column
                 df = pd.concat([df.drop(columns=['mechanistic']), mech_df], axis=1)
             else:
-                logger.warning("'mechanistic' column exists but is empty/null.")
                 df = df.drop(columns=['mechanistic'])
         
-        # 3. Handle Missing Values
-        if fill_na:
-            # Fill numeric NaNs with 0 (assuming lack of activation = 0)
-            # might want to use mean imputation depending on your theory
-            numeric_cols = df.select_dtypes(include=[np.number]).columns
-            df[numeric_cols] = df[numeric_cols].fillna(0)
-            
-        # 4. Drop standard metadata columns if they exist
-        existing_meta = [c for c in self.meta_cols if c in df.columns]
-        if existing_meta:
-            logger.info(f"Dropping metadata columns: {existing_meta}")
-            df = df.drop(columns=existing_meta)
+        # Fill NaNs
+        numeric_cols = df.select_dtypes(include=[np.number]).columns
+        df[numeric_cols] = df[numeric_cols].fillna(0)
 
-        # 5. Ensure Label is int (cast it to an int)
         if self.label_col in df.columns:
             df[self.label_col] = df[self.label_col].astype(int)
 
-        logger.info(f"Final Data Shape: {df.shape}")
+        logger.info(f"Data prepared. Shape: {df.shape}")
         return df
 
     def get_feature_groups(self, df: pd.DataFrame) -> Dict[str, List[str]]:
         """
-        Returns a dictionary separating feature names by type.
-        Useful for ablation: 'run with just uncertainty', 'run with just neurons', etc.
+        Groups features by high-level type (e.g. 'mechanistic', 'entropic')
+        and returns all combinations of these GROUPS.
         """
-        all_cols = set(df.columns) - {self.label_col}
+        all_cols = list(set(df.columns) - {self.label_col})
         
-        # 1. Mechanistic: usually start with a digit (e.g. "10_mean") or "neuron"
-        mech_feats = [c for c in all_cols if c[0].isdigit()]
+        # 1. Identify Groups based on column names
+        groups = {}
         
-        # 2. Uncertainty: specific keys we saved
-        uncert_feats = [c for c in all_cols if c in ["entropic", "min_logit_gap", "heuristic_score"]]
-        
-        # 3. Anything else (catch-all)
-        other_feats = [c for c in all_cols if c not in mech_feats and c not in uncert_feats]
-        
-        return {
-            "all": list(all_cols),
-            "mechanistic": mech_feats,
-            "uncertainty": uncert_feats,
-            "other": other_feats
-        }
+        # Mechanistic columns usually start with digit (e.g. "10_mean")
+        mech_cols = [c for c in all_cols if c[0].isdigit() or "neuron" in c.lower()]
+        if mech_cols:
+            groups["mechanistic"] = mech_cols
+            
+        # Scalar metrics
+        scalars = ["entropic", "min_logit_gap", "heuristic_score", "semantic_entropy"]
+        for s in scalars:
+            # We check if the scalar is in columns OR if a version of it exists
+            matches = [c for c in all_cols if s in c]
+            if matches:
+                groups[s] = matches
 
-    @staticmethod
-    def balance_binary_dataset(df: pd.DataFrame, label_col: str = "is_exact"):
-        """
-        Undersamples the majority class to create a 50/50 dataset.
-        """
+        # 2. Create Combinations of Groups
+        # e.g. ("entropic"), ("entropic", "mechanistic")
+        group_names = list(groups.keys())
+        feature_combinations = {}
+        
+        for r in range(1, len(group_names) + 1):
+            for combo in itertools.combinations(group_names, r):
+                # Create a key like "entropic_mechanistic"
+                combo_name = "_".join(combo)
+                
+                # Aggregate all columns for this combination
+                combo_cols = []
+                for group in combo:
+                    combo_cols.extend(groups[group])
+                
+                feature_combinations[combo_name] = combo_cols
+        
+        logger.info(f"Generated {len(feature_combinations)} ablation groups.")
+        return feature_combinations
+
+    def balance_binary_dataset(self, df: pd.DataFrame, label_col: str = "is_exact"):
         if label_col not in df.columns:
-            logger.warning(f"Label column {label_col} not found. Returning original DF.")
             return df
 
         true_df = df[df[label_col] == 1]
         false_df = df[df[label_col] == 0]
         
-        n_true = len(true_df)
-        n_false = len(false_df)
-        
-        if n_true == 0 or n_false == 0:
-            logger.warning("One class is empty. Cannot balance.")
+        min_count = min(len(true_df), len(false_df))
+        if min_count == 0:
+            logger.warning("Cannot balance dataset: one class is empty.")
             return df
-
-        logger.info(f"Balancing: True={n_true}, False={n_false}")
         
-        min_count = min(n_true, n_false)
-        
+        logger.info(f"Balancing dataset to {min_count} samples per class.")
         true_balanced = true_df.sample(n=min_count, random_state=42)
         false_balanced = false_df.sample(n=min_count, random_state=42)
         
         balanced_df = pd.concat([true_balanced, false_balanced])
-        # Shuffle
-        balanced_df = balanced_df.sample(frac=1, random_state=42).reset_index(drop=True)
-        
-        return balanced_df
+        return balanced_df.sample(frac=1, random_state=42).reset_index(drop=True)
 
     def normalize_data(self, df: pd.DataFrame):
-        """
-        Z-score normalization. Returns a NEW dataframe.
-        """
         df = df.copy()
-        
-        # Only normalize numeric columns, exclude label
         feature_cols = [c for c in df.columns if c != self.label_col and pd.api.types.is_numeric_dtype(df[c])]
         
         if not feature_cols:
             return df
 
-        logger.info(f"Normalizing {len(feature_cols)} features...")
-        
         features = df[feature_cols]
-        # Replace 0 std with 1 to prevent NaN
         std = features.std().replace(0, 1)
         mean = features.mean()
-        
         df[feature_cols] = (features - mean) / std
-        
         return df
     
-    def convert_df_to_numpy(self, df: pd.DataFrame, feature_subset: List[str] = None):
-        """
-        Converts DF to X, y numpy arrays.
-        Args:
-            feature_subset: If provided, only these columns are used for X.
-                            If None, all columns except label are used.
-        """
+    def convert_df_to_tensors(self, df: pd.DataFrame, feature_subset: List[str] = None):
         y_values = df[self.label_col].to_numpy().astype(np.float32)
         
         if feature_subset is not None:
-            # Ensure features exist
             valid_feats = [f for f in feature_subset if f in df.columns]
             if len(valid_feats) < len(feature_subset):
-                missing = set(feature_subset) - set(valid_feats)
-                logger.warning(f"Requested features missing from DF: {missing}")
-            
+                logger.warning(f"Some requested features missing. Found {len(valid_feats)}/{len(feature_subset)}")
             X_values = df[valid_feats].to_numpy().astype(np.float32)
         else:
             X_values = df.drop(columns=[self.label_col]).to_numpy().astype(np.float32)
