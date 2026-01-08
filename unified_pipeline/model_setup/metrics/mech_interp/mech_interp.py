@@ -12,7 +12,7 @@ class MechInterp:
     @classmethod
     def get_recorder(cls, model_name, model, mech_interp_ident_methods, entropy_neurons):
         path_to_identified_neurons = os.path.join(
-            "./unified_pipeline/models/metrics/mech_interp",
+            "./unified_pipeline/model_setup/metrics/mech_interp",
             model_name,
             f"{"_".join(mech_interp_ident_methods)}_{entropy_neurons}_neurons.json"
         )

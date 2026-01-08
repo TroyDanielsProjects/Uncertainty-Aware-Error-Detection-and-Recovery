@@ -32,6 +32,7 @@ class ExperimentConfig:
     data_size: int
     semantic_runs: int
     include_prefill: bool
+    explanation: bool
 
 
 # -------------------------
@@ -48,6 +49,10 @@ class ExperimentRunner:
 
         if self.config.task == "gsm8k":
             return DataLoader.get_or_read_gsm8k()
+        elif self.config.task == "cais_mmlu":
+            return DataLoader.get_or_read_cais_mmlu()
+        elif self.config.task == "mmlu_pro":
+            return DataLoader.get_or_read_mmlu_pro()
         else:
             raise ValueError(f"Unsupported task: {self.config.task}")
 
@@ -68,7 +73,8 @@ class ExperimentRunner:
             data_size=self.config.data_size,
             semantic_runs=self.config.semantic_runs,
             include_prefill=self.config.include_prefill,
-            device=device
+            device=device,
+            explanation=self.config.explanation,
         )
 
     def run(self):
@@ -175,12 +181,13 @@ def positive_int(value):
 def parse_args():
     parser = argparse.ArgumentParser("Uncertainty Quantification Experiment")
 
-    parser.add_argument("--task", default="gsm8k", choices=["gsm8k"])
+    parser.add_argument("--task", default="gsm8k", choices=["gsm8k", "cais_mmlu", "mmlu_pro"])
     parser.add_argument("--model", default="unsloth/Meta-Llama-3.1-8B", choices=["unsloth/Meta-Llama-3.1-8B"])
     parser.add_argument("--dtype", default="float16", choices=["float16", "bfloat16"])
     parser.add_argument("--preprocess", action="store_true")
     parser.add_argument("--include_prefill", action="store_false")
     parser.add_argument("--save_trace", action="store_false")
+    parser.add_argument("--explanation", action="store_false")
     parser.add_argument("--run_name", required=True)
     parser.add_argument("--output_dir", default="unified_pipeline/results")
     parser.add_argument("--entropy_neurons", type=positive_int, default=10)
@@ -237,6 +244,7 @@ def main():
         data_size=args.data_size,
         semantic_runs=args.semantic_runs,
         include_prefill=args.include_prefill,
+        explanation=args.explanation,
     )
     logger.info(f"Logging into Huggingface: {config.run_name}")
     login(token="") # I don't mind this for private repo, if made public needs to change

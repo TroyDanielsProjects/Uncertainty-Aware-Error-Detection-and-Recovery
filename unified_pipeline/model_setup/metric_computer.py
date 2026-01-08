@@ -36,33 +36,106 @@ except Exception as e:
 class MetricComputer:
     
     @staticmethod
-    def extract_answer_gsm8k(text: str) -> str:
+    def extract_answer_gsm8k(text: str, prompt_to_remove: str = None) -> str:
         """
         Extracts the answer from GSM8K examples or model output.
         """
         if not text: return ""
 
-        # 1. Gold Standard: GSM8K specific delimiter
+        # 1. Strip Prompt (Safety Step)
+        if prompt_to_remove and text.startswith(prompt_to_remove):
+            text = text[len(prompt_to_remove):]
+
+        # 1. Gold Standard: GSM8K dataset specific delimiter (usually for ground truth)
         if '####' in text:
             return text.split('####')[-1].strip().replace(',', '')
         
-        # 2. LaTeX Boxed (common in math fine-tunes)
-        # Note: simplistic regex, fails on nested {\}
-        match = re.search(r'\\boxed\{([^{}]+)\}', text)
+        # 2. Model Prompt Format: ***Answer: [answer]***
+        match = re.search(r'\*\*\*Answer:\s*(.*?)\*\*\*', text)
         if match:
-            return match.group(1).strip()
+            extracted = match.group(1).strip() # FIX: group(1), not group(2)
             
-        # 3. Fallback: Find the last number
+            # OPTIONAL BUT RECOMMENDED:
+            # Even though we captured the specific format, the model might have 
+            # sneaked in "5 apples". Let's run the number extractor on this specific substring.
+            # If that fails, return the raw string (it might be a text answer).
+            clean_extracted = extracted.replace(',', '').replace('$', '')
+            numbers = re.findall(r'-?\d+(?:\.\d+)?', clean_extracted)
+            if numbers:
+                return numbers[-1] # Return the number found inside the tags
+            return extracted # Return the raw text inside tags if no number found
+            
+        # 3. Fallback: Find the last number in the entire text
         # Remove common currency/formatting chars to simplify regex
         clean_text = text.replace(',', '').replace('$', '')
         
         # Find all integers or floats
-        # This regex matches: optional minus, digits, optional decimal part
         numbers = re.findall(r'-?\d+(?:\.\d+)?', clean_text)
         
         if numbers:
             return numbers[-1]
             
+        return ""
+    
+    @staticmethod
+    def extract_answer_mmlu(text: str, prompt_to_remove: str = None) -> str:
+        """
+        Extracts the multiple-choice answer (A, B, C, D) from MMLU model output.
+        """
+        if not text: return ""
+
+        # 1. Strip Prompt (Safety Step)
+        if prompt_to_remove and text.startswith(prompt_to_remove):
+            text = text[len(prompt_to_remove):]
+
+        # 2. Strict Format: ***Answer:[Letter]***
+        # We explicitly look for A, B, C, or D to avoid capturing garbage.
+        match = re.search(r'\*\*\*Answer:\s*([A-D])\s*\*\*\*', text, re.IGNORECASE)
+        if match:
+            return match.group(1).upper()
+
+        # 3. Fallback: Look for common variations
+        # Examples it catches: "Answer: A", "The answer is (B)", "Option C"
+        # We search for the *last* occurrence, as the chain of thought might discuss wrong answers first.
+        patterns = [
+            r'Answer:\s*([A-D])',        # "Answer: A"
+            r'Option\s*([A-D])',         # "Option A"
+            r'\b([A-D])\)',              # "A)" or "B)"
+            r'\(([A-D])\)'               # "(A)" or "(B)"
+        ]
+        
+        for pattern in patterns:
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            if matches:
+                return matches[-1].upper() # Return the last found match
+        
+        return ""
+    
+    @staticmethod
+    def extract_answer_mmlu_pro(text: str, prompt_to_remove: str = None) -> str:
+        if not text: return ""
+
+        if prompt_to_remove and text.startswith(prompt_to_remove):
+            text = text[len(prompt_to_remove):]
+
+        # Allow A-J (case insensitive)
+        match = re.search(r'\*\*\*Answer:\s*([A-J])\s*\*\*\*', text, re.IGNORECASE)
+        if match:
+            return match.group(1).upper()
+
+        # Fallback patterns for A-J
+        patterns = [
+            r'Answer:\s*([A-J])',
+            r'Option\s*([A-J])',
+            r'\b([A-J])\)',
+            r'\(([A-J])\)'
+        ]
+        
+        for pattern in patterns:
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            if matches:
+                return matches[-1].upper()
+        
         return ""
 
     @staticmethod
@@ -176,3 +249,31 @@ class MetricComputer:
         if not words: return 0.0
         ratio = sum(1 for w in words if w in hedges) / (len(words) + 1)
         return max(0.0, 1.0 - (ratio * 5)) # Penalize hedges
+    
+    @staticmethod
+    def calculate_semantic_entropy(generated_texts: List[str]) -> float:
+        """
+        Computes semantic entropy over a list of sampled generated texts.
+        1. Extracts answers from each text (e.g., '5', '5', '6').
+        2. Clusters identical answers.
+        3. Computes Shannon entropy over the answer distribution.
+        """
+        if not generated_texts:
+            return None
+        
+        # 1. Extract answers from all samples
+        # We reuse your existing extraction logic to normalize answers (e.g. "5.0" -> "5")
+        answers = [MetricComputer.extract_answer_gsm8k(text) for text in generated_texts]
+        
+        n = len(answers)
+        if n == 0: return 0.0
+        
+        # 2. Count frequencies of each unique answer
+        counts = Counter(answers)
+        probs = np.array(list(counts.values())) / n
+        
+        # 3. Compute Shannon Entropy: -sum(p * log(p))
+        # Add epsilon 1e-10 to avoid log(0) error
+        entropy = -np.sum(probs * np.log(probs + 1e-10))
+        
+        return float(entropy)

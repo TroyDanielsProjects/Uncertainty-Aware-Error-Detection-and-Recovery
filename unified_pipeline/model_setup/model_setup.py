@@ -17,6 +17,8 @@ logger = logging.getLogger(__name__)
 class Trace:
     text: str
     tokens: List[str]
+    explaination: Optional[str] = None
+    prompt_length: Optional[int] = None
     mechanistic: Optional[Dict[str, List[float]]] = None
     entropies: Optional[List[float]] = None
     top1_logprobs: Optional[List[float]] = None
@@ -36,6 +38,31 @@ class NumpyEncoder(json.JSONEncoder):
 class ModelSetup:
 
     mech_interp_recorder = None
+    gsm8k_explanation = f"""
+    I am going to be asking you to solve a math question.
+    Make sure the answer is in this format: ***Answer:[actual answer]***
+    Also make sure that only the numbers are present in the answer (no unit, or words)
+    So for example, if the answer was 5 inches, it should be formatted like so - ***Answer:5***
+    """
+    cais_mmlu_explanation = f"""
+    I am going to ask you to solve a multiple-choice question. 
+    The question is accompanied by a list of choices.
+
+    You must output the final answer as a **single capital letter** (A, B, C, or D) corresponding to the correct choice.
+    Make sure the answer is in this format: ***Answer:[Letter]***
+
+    Example: If the answer is "5 inches" and that corresponds to option B, your output should be: ***Answer:B***
+    """
+
+    mmlu_pro_explanation = f"""
+    I am going to ask you to solve a multiple-choice question.
+    The question is accompanied by a list of choices (up to 10 options).
+
+    You must output the final answer as a **single capital letter** (A, B, C, D, E, F, G, H, I, or J) corresponding to the correct choice.
+    Make sure the answer is in this format: ***Answer:[Letter]***
+
+    Example: If the answer corresponds to option B, your output should be: ***Answer:B***
+    """
 
     def __init__(
         self,
@@ -48,7 +75,8 @@ class ModelSetup:
         data_size: int,
         semantic_runs: int,
         include_prefill: bool,
-        device: str
+        device: str,
+        explanation: bool,
     ):
         self.device = device
         self.neuron_indices = []
@@ -61,6 +89,7 @@ class ModelSetup:
         self.data_size = data_size
         self.semantic_runs = semantic_runs
         self.include_prefill = include_prefill
+        self.use_explanation = explanation
 
         logger.info(f"Initializing ModelSetup for {model_name} on {device}...")
         # will get torch dytpe from string
@@ -112,13 +141,17 @@ class ModelSetup:
             logger.info("Initializing heuristic Metric")
             self.heuristic = True
     
-    def solve(self, prompt: str) -> Trace:
+    def solve(self, prompt: str, explanation: str = None) -> Trace:
         """
         Generates n_samples solutions.
         Captures each activated metric
         """
-        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
-        prompt_len = inputs.input_ids.shape[1]
+
+        if explanation:
+            full_prompt = explanation + prompt
+        inputs = self.tokenizer(full_prompt, return_tensors="pt").to(self.device)
+        explanation_len = self.token_length(explanation)
+        prompt_len = self.token_length(prompt)
 
         # Helper context manager to handle optional recorder
         # (If recorder is None, we need a dummy context, or just if/else block)
@@ -144,15 +177,24 @@ class ModelSetup:
             return None
 
         # Process Output
-        start = 0 if self.include_prefill else prompt_len
-        gen_seq = out.sequences[0, start:] # NOTE - we are getting rid of prompt is this desirable??? could info not be save int the entropy and activations of the prompt???
+        start = explanation_len if self.include_prefill else explanation_len + prompt_len
+        gen_seq = out.sequences[0, start:]
         text = self.tokenizer.decode(gen_seq, skip_special_tokens=True)
         tokens = self.tokenizer.convert_ids_to_tokens(gen_seq)
 
-        trace = Trace(
-            text=text,
-            tokens=tokens
-        )
+        if self.use_explanation:
+            trace = Trace(
+                explaination=explanation_len,
+                prompt_length=len(prompt),
+                text=text,
+                tokens=tokens
+            )
+        else:
+            trace = Trace(
+                prompt_length=len(prompt),
+                text=text,
+                tokens=tokens
+            )
 
         # Extract Metrics
         if self.entropic or self.logit_gap:
@@ -181,7 +223,6 @@ class ModelSetup:
             activations = self.mech_interp_recorder.get_activations()
 
             if activations is not None:
-                # Remove prompt activations NOTE - may want to change
                 gen_activations = activations[start:, :]
                 # Transpose: [Seq_Len, Neurons] -> [Neurons, Seq_Len]
                 activations_by_neuron = gen_activations.T.cpu()
@@ -216,6 +257,11 @@ class ModelSetup:
             trace.semantic = semantic
         return trace
     
+    def token_length(self, prompt: str):
+        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
+        prompt_len = inputs.input_ids.shape[1]
+        return prompt_len
+    
     def run(self, dataset, output_path_results, processed_ids, save_trace = False, output_path_trace = None):
         logger.info(f"Starting run on dataset with {len(dataset)} examples...")
         results = []
@@ -230,6 +276,19 @@ class ModelSetup:
         check_if_exist = processed_ids is not None
         subset = dataset[:self.data_size]
 
+        # A. Generate (Heavy GPU Work)
+        explanation = ""
+        if self.use_explanation:
+            if self.task == 'gsm8k':
+                explanation = self.gsm8k_explanation
+                logger.info(f"gms8k explanation set")
+            elif self.task == "cais_mmlu":
+                explanation = self.cais_mmlu_explanation
+            elif self.task == "mmlu_pro":
+                explanation = self.mmlu_pro_explanation
+            else:
+                logger.warning(f"Task {self.task} not found when trying to set explaination")
+
         for i, row in enumerate(tqdm(subset, desc=f"Running Experiment w {self.model_name}")):
             try:
                 if check_if_exist:
@@ -237,10 +296,9 @@ class ModelSetup:
                     # SKIP if already done
                     if row_id in processed_ids:
                         continue
-
-                # A. Generate (Heavy GPU Work)
-                prompt = f"Question: {row["q"]}\nLet's think step by step.\nAnswer:"
-                trace = self.solve(prompt)
+                    
+                prompt = f"Question: {row["q"]}\nLet's think step by step."""
+                trace = self.solve(prompt, explanation=explanation)
                 if not trace: 
                     logger.warning(f"No trace generated for ID {row.get('id', 'unknown')}")
                     continue
@@ -248,18 +306,21 @@ class ModelSetup:
                 # B. Compute Metrics (CPU Work)
                 # We collect all data for this question first
                 if self.task == "gsm8k":
-                    pred = MetricComputer.extract_answer_gsm8k(trace.text)
+                    pred = MetricComputer.extract_answer_gsm8k(trace.text, prompt_to_remove=prompt)
+                elif self.task == "cais_mmlu":
+                    pred = MetricComputer.extract_answer_mmlu(trace.text, prompt_to_remove=prompt)
+                elif self.task == "mmlu_pro":
+                    pred = MetricComputer.extract_answer_mmlu_pro(trace.text, prompt_to_remove=prompt)
 
                 is_exact = MetricComputer.check_correctness(pred, row["gold"])
 
                 mechanistic = MetricComputer.aggregate_activations(trace.mechanistic) if trace.mechanistic else None
                 avg_entropy = float(np.mean(trace.entropies)) if trace.entropies else None
                 gap = MetricComputer.logit_gap(trace.top1_logprobs, trace.top2_logprobs) if trace.top1_logprobs else None
-                semantic_text = trace.semantic if trace.semantic else None
-
                 avg_entropy=float(np.mean(trace.entropies)) if trace.entropies else None
                 min_logit_gap=float(np.min(gap)) if gap.size else None
                 heuristic_score=MetricComputer.calculate_heuristic_score(trace.text, use_embeddings=True) if self.heuristic else None
+                semantic_score = MetricComputer.calculate_semantic_entropy(trace.semantic) if trace.semantic else None
                     
                 result_entry = {
                     "id": row.get("id"),
@@ -271,7 +332,7 @@ class ModelSetup:
                     "entropic": avg_entropy,
                     "min_logit_gap": min_logit_gap,
                     "heurisitc_score": heuristic_score,
-                    "semantic_entropy": semantic_text # NOTE - this needs to be changed from the text to the score
+                    "semantic_entropy": semantic_score 
                 }
 
                 results.append(result_entry)

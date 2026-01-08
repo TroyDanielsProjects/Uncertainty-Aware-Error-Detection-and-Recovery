@@ -192,12 +192,12 @@ def parse_args():
 
 
 def setup_logging(run_name: str):
-    os.makedirs("logs/experiments", exist_ok=True)
+    os.makedirs("logs/classifier", exist_ok=True)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s | %(levelname)s | %(message)s",
         handlers=[
-            logging.FileHandler(f"logs/experiments/{run_name}.log"),
+            logging.FileHandler(f"logs/classifier/{run_name}.log"),
             logging.StreamHandler(sys.stdout),
         ],
     )
