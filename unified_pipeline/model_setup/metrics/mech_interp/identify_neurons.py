@@ -28,14 +28,52 @@ class Entropy_Neurons_Identification:
 
         # Identify Wout and WU
         try:
-            layer_idx = len(self.model.model.layers) - 1
+            # 1. Resolve Base Model (Llama/Gemma/Qwen usually use .model, older Qwen might use .transformer)
+            if hasattr(self.model, "model"):
+                base_model = self.model.model
+            elif hasattr(self.model, "transformer"):
+                base_model = self.model.transformer
+            else:
+                base_model = self.model
+                logger.warning(f"Could not find .model or .transformer attribute. Attempting to use model instance directly.")
 
+            # 2. Resolve Layers
+            if hasattr(base_model, "layers"):
+                layers = base_model.layers
+            elif hasattr(base_model, "h"): # Fallback for some architectures
+                layers = base_model.h
+            else:
+                raise AttributeError(f"Could not find 'layers' or 'h' in base model for {model_name}")
+
+            layer_idx = len(layers) - 1
             logger.info(f"Targeting last layer index: {layer_idx}")
+            
+            last_layer = layers[layer_idx]
 
-            down_proj = self.model.model.layers[layer_idx].mlp.down_proj
-            lm_head = self.model.lm_head
+            # 3. Resolve MLP Down Projection
+            # Standard Llama/Gemma/Qwen2+ use 'mlp.down_proj'
+            if hasattr(last_layer, "mlp"):
+                mlp_module = last_layer.mlp
+                if hasattr(mlp_module, "down_proj"):
+                    down_proj = mlp_module.down_proj
+                elif hasattr(mlp_module, "c_proj"): # Sometimes seen in older Qwen/GPT-like
+                    down_proj = mlp_module.c_proj
+                    logger.info("Detected 'c_proj' instead of 'down_proj' (Qwen/GPT style).")
+                else:
+                    raise AttributeError(f"Could not find 'down_proj' or 'c_proj' in MLP layer for {model_name}")
+            else:
+                raise AttributeError(f"Could not find 'mlp' module in last layer for {model_name}")
 
-            logger.info(f"Layer path identified: model.model.layers[{layer_idx}].mlp.down_proj")
+            # 4. Resolve LM Head
+            # Usually self.model.lm_head
+            if hasattr(self.model, "lm_head"):
+                lm_head = self.model.lm_head
+            elif hasattr(self.model, "embed_out"): # Some architectures
+                lm_head = self.model.embed_out
+            else:
+                raise AttributeError(f"Could not find 'lm_head' for {model_name}")
+
+            logger.info(f"Layer path identified for {model_name}. Extracting weights...")
 
             self.Wout = down_proj.weight.float().detach() # [d_model, d_mlp]
             self.WU = lm_head.weight.float().detach()     # [V, d_model]
@@ -80,7 +118,7 @@ class Entropy_Neurons_Identification:
         if identify_by_variance:
             logger.info("Starting Variance Identification...")
             vars = torch.var(self.L, dim=0)
-            print(vars.shape)
+            # print(vars.shape) 
             neuron_candidates.append(torch.topk(vars, k=self.k, largest=False).indices)
             logger.info("Successfully Identified Neurons based on Variance")
         if identify_by_max_std_dev:
@@ -95,11 +133,17 @@ class Entropy_Neurons_Identification:
             logger.warning("No identification methods selected. Returning empty list.")
             entropy_neurons = torch.tensor([], dtype=torch.long)
 
-        with open(file_name, 'w') as file:
+        # Ensure output directory exists
+        if os.path.dirname(self.output_path):
+            os.makedirs(os.path.dirname(self.output_path), exist_ok=True)
+            
+        full_path = os.path.join(self.output_path, file_name) if os.path.isdir(self.output_path) else self.output_path
+
+        with open(full_path, 'w') as file:
             # 3. Dump the list into the file
             # indent=4 makes it readable (pretty-printed)
             json.dump(entropy_neurons.tolist(), file, indent=4)
-        logger.info(f"Calibration complete. Saved {len(entropy_neurons)} indices to {file_name}")
+        logger.info(f"Calibration complete. Saved {len(entropy_neurons)} indices to {full_path}")
 
 
     def cosine_sim_identification(self):
@@ -113,7 +157,7 @@ class Entropy_Neurons_Identification:
         d_mlp = self.Wout.shape[1]
         
         for i in tqdm(range(0, d_mlp, batch_size)):
-            d_mlp = self.Wout.shape[1] 
+            # d_mlp = self.Wout.shape[1] # Removed redundant assignment inside loop
             Wout_batch = self.Wout[:, i:i+batch_size] # [d_model, batch_size]
             
             # 2. Calculate ||Wout|| (Column norms) for this batch

@@ -182,7 +182,7 @@ def parse_args():
     parser = argparse.ArgumentParser("Uncertainty Quantification Experiment")
 
     parser.add_argument("--task", default="gsm8k", choices=["gsm8k", "cais_mmlu", "mmlu_pro"])
-    parser.add_argument("--model", default="unsloth/Meta-Llama-3.1-8B", choices=["unsloth/Meta-Llama-3.1-8B"])
+    parser.add_argument("--model", default="llama", choices=["llama", "qwen", "gemma"])
     parser.add_argument("--dtype", default="float16", choices=["float16", "bfloat16"])
     parser.add_argument("--preprocess", action="store_true")
     parser.add_argument("--include_prefill", action="store_false")
@@ -230,9 +230,16 @@ def main():
     args = parse_args()
     logger = setup_logging(args.run_name)
 
+    if args.model == "llama":
+        model_name = "unsloth/Meta-Llama-3.1-8B"
+    elif args.model == "qwen":
+        model_name = "Qwen/Qwen3-8B"
+    elif args.model == "gemma":
+        model_name = "google/gemma-2b"
+
     config = ExperimentConfig(
         task=args.task,
-        model_name=args.model,
+        model_name=model_name,
         dtype=args.dtype,
         uq_methods=args.uq_methods,
         preprocess=args.preprocess,
