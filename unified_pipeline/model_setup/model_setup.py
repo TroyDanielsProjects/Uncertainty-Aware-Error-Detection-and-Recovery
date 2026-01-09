@@ -149,6 +149,8 @@ class ModelSetup:
 
         if explanation:
             full_prompt = explanation + prompt
+        else: 
+            full_prompt = prompt
         inputs = self.tokenizer(full_prompt, return_tensors="pt").to(self.device)
         explanation_len = self.token_length(explanation)
         prompt_len = self.token_length(prompt)
@@ -248,12 +250,19 @@ class ModelSetup:
                         max_new_tokens=256,
                         temperature=0.7,
                         do_sample=True, 
+                        return_dict_in_generate=True, 
+                        output_scores=True,
                         pad_token_id=self.tokenizer.eos_token_id
                     )
 
                     gen_seq = full_generation[0, prompt_len:]
                     text = self.tokenizer.decode(gen_seq, skip_special_tokens=True)
-                    semantic.append(text)
+                    tokens = self.tokenizer.convert_ids_to_tokens(gen_seq)
+                    semantic_entry = {
+                        "text": text,
+                        "tokens": tokens
+                    }
+                    semantic.append(semantic_entry)
             trace.semantic = semantic
         return trace
     

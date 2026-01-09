@@ -52,6 +52,7 @@ class Entropy_Neurons_Identification:
 
             # 3. Resolve MLP Down Projection
             # Standard Llama/Gemma/Qwen2+ use 'mlp.down_proj'
+            # gemma - model.layers.17.mlp.down_proj.weight
             if hasattr(last_layer, "mlp"):
                 mlp_module = last_layer.mlp
                 if hasattr(mlp_module, "down_proj"):

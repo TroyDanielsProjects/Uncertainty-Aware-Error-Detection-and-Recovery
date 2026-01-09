@@ -187,7 +187,7 @@ def parse_args():
     parser.add_argument("--preprocess", action="store_true")
     parser.add_argument("--include_prefill", action="store_false")
     parser.add_argument("--save_trace", action="store_false")
-    parser.add_argument("--explanation", action="store_false")
+    parser.add_argument("--explanation", action="store_true")
     parser.add_argument("--run_name", required=True)
     parser.add_argument("--output_dir", default="unified_pipeline/results")
     parser.add_argument("--entropy_neurons", type=positive_int, default=10)
